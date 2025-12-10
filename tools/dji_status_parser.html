@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DJI Camera Status Parser (DJI R SDK)</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 1.5rem;
+      background: #f5f5f5;
+      color: #222;
+    }
+    h1 {
+      margin-top: 0;
+      font-size: 1.4rem;
+    }
+    textarea {
+      width: 100%;
+      min-height: 8rem;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+      padding: 0.5rem;
+      box-sizing: border-box;
+    }
+    button {
+      margin-top: 0.5rem;
+      padding: 0.4rem 0.9rem;
+      border-radius: 4px;
+      border: 1px solid #888;
+      background: #fff;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #eee;
+    }
+    .section {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      background: #fff;
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+    .section h2 {
+      margin-top: 0;
+      font-size: 1.1rem;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 0.8rem;
+      margin-top: 0.5rem;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 0.2rem 0.35rem;
+      text-align: left;
+      white-space: nowrap;
+    }
+    th {
+      background: #fafafa;
+    }
+    code {
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+      background: #f0f0f0;
+      padding: 0.1rem 0.25rem;
+      border-radius: 3px;
+    }
+    .error {
+      color: #b00020;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <h1>DJI Camera Status Parser (DJI R SDK)</h1>
+  <p>
+    Paste a log snippet containing
+    <code>DATA: RX notification frame</code> and the following hex lines below.
+  </p>
+
+  <textarea id="logInput" spellcheck="false">
+I (54493) DATA: RX notification frame:
+I (54493) DATA: aa 38 00 01 00 00 00 00 19 e4 d2 54 1d 02 01 01
+I (54496) DATA: 10 05 01 00 00 00 00 00 00 00 00 00 00 6f 01 03
+I (54502) DATA: 00 00 00 00 00 70 41 00 00 01 03 00 00 00 00 00
+I (54508) DATA: 00 00 00 1e 15 dc 1d b4
+  </textarea>
+  <br>
+  <button onclick="parseLog()">Parse</button>
+
+  <div id="result"></div>
+
+  <script>
+    // DJI R frame assumptions:
+    // Byte 0     : SOF (0xAA)
+    // Byte 1–2   : Frame length (little endian, includes entire frame)
+    // Byte 3–11  : Version / flags / session / seq / header CRC, etc.
+    // Byte 12..  : Payload (starts with CmdSet, CmdId)
+    // Last 4 bytes: CRC32 over payload (little endian)
+
+    const CMD_SET_NAMES = {
+      0x00: "System (?)",
+      0x01: "Common (?)",
+      0x1d: "Camera / Osmo"
+    };
+
+    const CMD_ID_NAMES = {
+      "1d-02": "Camera Status Push",
+      "1d-06": "New Camera Status Push"
+    };
+
+    function formatHex(value, width = 2) {
+      return value.toString(16).padStart(width, "0").toUpperCase();
+    }
+
+    function bytesToHex(bytes, sep = " ") {
+      return bytes.map(b => formatHex(b)).join(sep);
+    }
+
+    function bytesToUint32LE(bytes, offset = 0) {
+      if (bytes.length < offset + 4) return null;
+      return (bytes[offset] |
+              (bytes[offset + 1] << 8) |
+              (bytes[offset + 2] << 16) |
+              (bytes[offset + 3] << 24)) >>> 0;
+    }
+
+    function bytesToUint16LE(bytes, offset = 0) {
+      if (bytes.length < offset + 2) return null;
+      return (bytes[offset] | (bytes[offset + 1] << 8)) >>> 0;
+    }
+
+    function bytesToAscii(bytes, maxLen) {
+      const slice = (typeof maxLen === "number")
+        ? bytes.slice(0, maxLen)
+        : bytes;
+
+      const chars = [];
+      for (const b of slice) {
+        if (b === 0x00) break; // terminate at first NUL
+        if (b >= 32 && b <= 126) {
+          chars.push(String.fromCharCode(b));
+        } else {
+          chars.push(".");
+        }
+      }
+      return chars.join("");
+    }
+
+    function parseLog() {
+      const input = document.getElementById("logInput").value || "";
+      const resultDiv = document.getElementById("result");
+      resultDiv.innerHTML = "";
+
+      // Only match isolated 2-digit hex "words" – ignore timestamps like 54493
+      const hexMatches = input.match(/\b[0-9a-fA-F]{2}\b/g);
+      if (!hexMatches || hexMatches.length === 0) {
+        resultDiv.innerHTML = "<p class='error'>No hex bytes found in the text.</p>";
+        return;
+      }
+
+      const bytes = hexMatches.map(h => parseInt(h, 16));
+
+      // Discard everything before the first SOF (0xAA)
+      const startIdx = bytes.indexOf(0xAA);
+      if (startIdx === -1) {
+        resultDiv.innerHTML = "<p class='error'>No frame start (0xAA) found in the data.</p>";
+        return;
+      }
+      const frameBytes = bytes.slice(startIdx);
+
+      try {
+        const frame = parseSingleFrame(frameBytes);
+        renderFrame(frame, resultDiv);
+      } catch (e) {
+        console.error(e);
+        resultDiv.innerHTML = `<p class="error">Parse error: ${e.message}</p>`;
+      }
+    }
+
+    function parseSingleFrame(bytes) {
+      if (bytes.length < 12) {
+        throw new Error("Not enough bytes for a DJI R frame.");
+      }
+
+      const sof = bytes[0];
+      const length = bytes[1] | (bytes[2] << 8);
+
+      if (sof !== 0xAA) {
+        throw new Error(`Invalid SOF: expected 0xAA, got 0x${formatHex(sof)}`);
+      }
+
+      if (length !== bytes.length) {
+        console.warn("Frame length in header does not match number of bytes.",
+                     "Header:", length, "Bytes:", bytes.length);
+      }
+
+      const version = bytes[3];
+      const sesAck = bytes[4];
+      const seq = bytes[5] | (bytes[6] << 8) | (bytes[7] << 16);
+      const headerCrc = bytes[8] | (bytes[9] << 8);
+      // bytes[10], bytes[11] are still part of the header on this device
+
+      const HEADER_LEN = 12;
+      const CRC32_LEN = 4;
+      const payloadEnd = length - CRC32_LEN;
+
+      if (payloadEnd <= HEADER_LEN) {
+        throw new Error("Frame too short to contain payload and CRC32.");
+      }
+
+      const payloadBytes = bytes.slice(HEADER_LEN, payloadEnd);
+      const crc32Bytes = bytes.slice(payloadEnd, length);
+
+      const cmdSet = payloadBytes[0];
+      const cmdId = payloadBytes[1];
+      const dataBytes = payloadBytes.slice(2);
+
+      const cmdSetName = CMD_SET_NAMES[cmdSet] || "unknown";
+      const cmdKey = `${formatHex(cmdSet, 2).toLowerCase()}-${formatHex(cmdId, 2).toLowerCase()}`;
+      const cmdIdName = CMD_ID_NAMES[cmdKey] || "unknown";
+
+      const payloadDecoded = decodePayload(cmdSet, cmdId, dataBytes);
+
+      return {
+        rawBytes: bytes,
+        sof,
+        length,
+        version,
+        sesAck,
+        seq,
+        headerCrc,
+        payloadBytes,
+        crc32Bytes,
+        crc32Value: bytesToUint32LE(crc32Bytes, 0),
+        cmdSet,
+        cmdSetName,
+        cmdId,
+        cmdIdName,
+        dataBytes,
+        payloadDecoded
+      };
+    }
+
+    function decodePayload(cmdSet, cmdId, dataBytes) {
+      const key = `${formatHex(cmdSet, 2).toLowerCase()}-${formatHex(cmdId, 2).toLowerCase()}`;
+
+      if (key === "1d-02") {
+        return decodeCameraStatusPush1D02(dataBytes);
+      }
+
+      if (key === "1d-06") {
+        return decodeNewCameraStatusPush1D06(dataBytes);
+      }
+
+      return {
+        type: "unknown",
+        note: "CmdSet/CmdId not specifically handled. See protocol_data_segment.md.",
+        rawHex: bytesToHex(dataBytes),
+        fields: {}
+      };
+    }
+
+    // ===== Mapping helpers for 1D02 =====
+
+    function mapCameraMode(v) {
+      const map = {
+        0x00: "Slow Motion",
+        0x01: "Video",
+        0x02: "Timelapse",
+        0x05: "Photo",
+        0x0A: "Hyperlapse",
+        0x1A: "Live Streaming",
+        0x23: "UVC Live Streaming",
+        0x28: "SuperNight",
+        0x34: "Subject Tracking",
+        0x38: "Panoramic Video (Osmo360)",
+        0x3A: "Hyperlapse (Osmo360)",
+        0x3C: "Selfie Mode (Osmo360)",
+        0x3F: "Panoramic Photo (Osmo360)",
+        0x41: "Boost Video (Osmo360)",
+        0x43: "Vortex (Osmo360)",
+        0x44: "360° SuperNight (Osmo360)",
+        0x4A: "Single Lens SuperNight (Osmo360)"
+      };
+      let name = map[v] || "unknown";
+      if (v > 0x34) {
+        name += " (new protocol, see 1D06)";
+      }
+      return name;
+    }
+
+    function mapCameraStatus(v) {
+      const map = {
+        0x00: "Screen off",
+        0x01: "Live / preview (screen on)",
+        0x02: "Playback",
+        0x03: "Photo or recording",
+        0x05: "Pre-recording"
+      };
+      return map[v] || "unknown";
+    }
+
+    function mapVideoResolution(v) {
+      const map = {
+        10: "1080p",
+        16: "4K 16:9",
+        45: "2.7K 16:9",
+        66: "1080p 9:16",
+        67: "2.7K 9:16",
+        95: "2.7K 4:3",
+        103: "4K 4:3",
+        109: "4K 9:16",
+        4: "Photo L / Ultra Wide 30MP",
+        3: "Photo M / Wide 20MP",
+        2: "Photo Standard 12MP"
+      };
+      return map[v] || "unknown";
+    }
+
+    function mapFpsOrBurst(v, cameraMode) {
+      const fpsMap = {
+        1: "24fps",
+        2: "25fps",
+        3: "30fps",
+        4: "48fps",
+        5: "50fps",
+        6: "60fps",
+        10: "100fps",
+        7: "120fps",
+        19: "200fps",
+        8: "240fps"
+      };
+
+      if (cameraMode === 0x00) {
+        return `${v}x Slow Motion (fps = ${v} × 30)`;
+      }
+
+      if (cameraMode === 0x05) {
+        if (v === 1) return "Single photo";
+        if (v > 1) return `Burst: ${v} shots`;
+      }
+
+      return fpsMap[v] || "unknown";
+    }
+
+    function mapEIS(v) {
+      const map = {
+        0: "Off",
+        1: "RS",
+        2: "HS",
+        3: "RS+",
+        4: "HB"
+      };
+      return map[v] || "unknown";
+    }
+
+    function mapPhotoRatio(v) {
+      const map = {
+        0: "4:3",
+        1: "16:9"
+      };
+      return map[v] || "unknown";
+    }
+
+    function mapUserMode(v) {
+      const map = {
+        0: "General mode",
+        1: "Custom 1",
+        2: "Custom 2",
+        3: "Custom 3",
+        4: "Custom 4",
+        5: "Custom 5"
+      };
+      return map[v] || "unknown (treat as 0)";
+    }
+
+    function mapPowerMode(v) {
+      const map = {
+        0: "Normal",
+        3: "Sleep"
+      };
+      return map[v] || "unknown";
+    }
+
+    function mapTempOver(v) {
+      const map = {
+        0: "Normal",
+        1: "Warning (can still record)",
+        2: "High, cannot record",
+        3: "Overheat, shutting down"
+      };
+      return map[v] || "unknown";
+    }
+
+    function mapLoopDuration(v) {
+      if (v === 0) return "Off";
+      if (v === 65535) return "Max";
+      if (v === 300) return "5 minutes";
+      if (v === 1200) return "20 minutes";
+      if (v === 3600) return "1 hour";
+      return `${v} seconds`;
+    }
+
+    function formatSeconds(sec) {
+      if (sec == null) return null;
+      const s = sec % 60;
+      const m = Math.floor(sec / 60) % 60;
+      const h = Math.floor(sec / 3600);
+      return `${h}h ${m}m ${s}s`;
+    }
+
+    function decodeCameraStatusPush1D02(data) {
+      const getByte = (idx) => (idx < data.length ? data[idx] : null);
+
+      const camera_mode = getByte(0);
+      const camera_status = getByte(1);
+      const video_resolution = getByte(2);
+      const fps_idx = getByte(3);
+      const EIS_mode = getByte(4);
+      const record_time = bytesToUint16LE(data, 5);
+      const fov_type = getByte(7);
+      const photo_ratio = getByte(8);
+      const real_time_countdown = bytesToUint16LE(data, 9);
+      const timelapse_interval = bytesToUint16LE(data, 11);
+      const timelapse_duration = bytesToUint16LE(data, 13);
+      const remain_capacity = bytesToUint32LE(data, 15);
+      const remain_photo_num = bytesToUint32LE(data, 19);
+      const remain_time = bytesToUint32LE(data, 23);
+      const user_mode = getByte(27);
+      const power_mode = getByte(28);
+      const camera_mode_next_flag = getByte(29);
+      const temp_over = getByte(30);
+      const photo_countdown_ms = bytesToUint32LE(data, 31);
+      const loop_record_sends = bytesToUint16LE(data, 35);
+      const camera_bat_percentage = getByte(37);
+
+      return {
+        type: "Camera Status Push (CmdSet 0x1D, CmdID 0x02)",
+        note: "New Osmo360 modes additionally use 1D06 for names/parameters.",
+        rawHex: bytesToHex(data),
+        fields: {
+          camera_mode: {
+            value: camera_mode,
+            hex: camera_mode != null ? "0x" + formatHex(camera_mode) : null,
+            description: mapCameraMode(camera_mode)
+          },
+          camera_status: {
+            value: camera_status,
+            hex: camera_status != null ? "0x" + formatHex(camera_status) : null,
+            description: mapCameraStatus(camera_status)
+          },
+          video_resolution: {
+            value: video_resolution,
+            description: mapVideoResolution(video_resolution)
+          },
+          fps_idx: {
+            value: fps_idx,
+            description: mapFpsOrBurst(fps_idx, camera_mode)
+          },
+          EIS_mode: {
+            value: EIS_mode,
+            description: mapEIS(EIS_mode)
+          },
+          record_time: {
+            value: record_time,
+            unit: (camera_mode === 0x05) ? "ms (burst limit)" : "s",
+            human: (camera_mode === 0x05)
+              ? (record_time != null ? (record_time / 1000).toFixed(2) + " s (burst limit)" : null)
+              : (record_time != null ? formatSeconds(record_time) : null),
+            description: "Current recording time (or burst limit in ms)"
+          },
+          fov_type: {
+            value: fov_type,
+            description: "FOV type (reserved)"
+          },
+          photo_ratio: {
+            value: photo_ratio,
+            description: mapPhotoRatio(photo_ratio)
+          },
+          real_time_countdown: {
+            value: real_time_countdown,
+            unit: "s",
+            description: "Real-time countdown"
+          },
+          timelapse_interval: {
+            value: timelapse_interval,
+            unit: "0.1 s",
+            human: timelapse_interval != null
+              ? (timelapse_interval / 10).toFixed(1) + " s"
+              : null,
+            description: "Timelapse interval / capture rate"
+          },
+          timelapse_duration: {
+            value: timelapse_duration,
+            unit: "s",
+            human: timelapse_duration != null ? formatSeconds(timelapse_duration) : null,
+            description: "Timelapse duration"
+          },
+          remain_capacity: {
+            value: remain_capacity,
+            unit: "MB",
+            description: "Remaining SD capacity"
+          },
+          remain_photo_num: {
+            value: remain_photo_num,
+            description: "Remaining photo count"
+          },
+          remain_time: {
+            value: remain_time,
+            unit: "s",
+            human: remain_time != null ? formatSeconds(remain_time) : null,
+            description: "Remaining recording time"
+          },
+          user_mode: {
+            value: user_mode,
+            description: mapUserMode(user_mode)
+          },
+          power_mode: {
+            value: power_mode,
+            description: mapPowerMode(power_mode)
+          },
+          camera_mode_next_flag: {
+            value: camera_mode_next_flag,
+            description: "Pre-switch (QS) next/current mode"
+          },
+          temp_over: {
+            value: temp_over,
+            description: mapTempOver(temp_over)
+          },
+          photo_countdown_ms: {
+            value: photo_countdown_ms,
+            unit: "ms",
+            human: photo_countdown_ms != null
+              ? (photo_countdown_ms / 1000).toFixed(1) + " s"
+              : null,
+            description: "Photo countdown"
+          },
+          loop_record_sends: {
+            value: loop_record_sends,
+            unit: "s",
+            human: mapLoopDuration(loop_record_sends),
+            description: "Loop recording duration"
+          },
+          camera_bat_percentage: {
+            value: camera_bat_percentage,
+            unit: "%",
+            description: "Camera battery level"
+          }
+        }
+      };
+    }
+
+    // ===== Decoder for New Camera Status Push (1D06) =====
+    function decodeNewCameraStatusPush1D06(data) {
+      // Spec (command frame, excluding cmdSet/cmdId):
+      // Offset  Size  Name              Type       Description
+      // 0       1     type_mode_name    uint8_t    Fixed 0x01
+      // 1       1     mode_name_length  uint8_t    Mode name length
+      // 2       21    mode_name         uint8_t[]  ASCII, up to 20 bytes
+      // 23      1     type_mode_param   uint8_t    Fixed 0x02
+      // 24      1     mode_param_length uint8_t    Mode parameter length
+      // 25      21    mode_param        uint8_t[]  ASCII, up to 20 bytes
+
+      const getByte = (idx) => (idx < data.length ? data[idx] : null);
+
+      const type_mode_name    = getByte(0);
+      const mode_name_length  = getByte(1);
+      const mode_name_raw     = data.slice(2, 2 + 21);
+
+      const type_mode_param   = getByte(23);
+      const mode_param_length = getByte(24);
+      const mode_param_raw    = data.slice(25, 25 + 21);
+
+      const mode_name  = bytesToAscii(mode_name_raw,  mode_name_length != null ? mode_name_length : 21);
+      const mode_param = bytesToAscii(mode_param_raw, mode_param_length != null ? mode_param_length : 21);
+
+      return {
+        type: "New Camera Status Push (CmdSet 0x1D, CmdID 0x06)",
+        note: "Provides human-readable mode name and parameters for newer modes (e.g. VIDEO / 4K30 RS).",
+        rawHex: bytesToHex(data),
+        fields: {
+          type_mode_name: {
+            value: type_mode_name,
+            hex: type_mode_name != null ? "0x" + formatHex(type_mode_name) : null,
+            description: "Mode name type (fixed 0x01)"
+          },
+          mode_name_length: {
+            value: mode_name_length,
+            description: "Mode name length in bytes"
+          },
+          mode_name: {
+            value: mode_name,
+            description: "ASCII mode name (displayed directly by camera UI)"
+          },
+          type_mode_param: {
+            value: type_mode_param,
+            hex: type_mode_param != null ? "0x" + formatHex(type_mode_param) : null,
+            description: "Mode parameter type (fixed 0x02)"
+          },
+          mode_param_length: {
+            value: mode_param_length,
+            description: "Mode parameter length in bytes"
+          },
+          mode_param: {
+            value: mode_param,
+            description: "ASCII mode parameter (e.g. 4K30 RS)"
+          }
+        }
+      };
+    }
+
+    function formatFieldValue(field) {
+      if (!field) return "";
+      const parts = [];
+
+      if (field.value != null) {
+        parts.push(String(field.value));
+      }
+      if (field.hex) {
+        parts.push(field.hex);
+      }
+      if (field.unit) {
+        parts.push(field.unit);
+      }
+      if (field.human) {
+        parts.push("≈ " + field.human);
+      }
+
+      return parts.join(" | ");
+    }
+
+    function renderFrame(frame, container) {
+      const {
+        sof, length, version, sesAck, seq, headerCrc,
+        cmdSet, cmdSetName, cmdId, cmdIdName,
+        payloadBytes, crc32Bytes, crc32Value,
+        dataBytes, payloadDecoded
+      } = frame;
+
+      let html = "";
+
+      // Summary
+      html += `<div class="section">
+        <h2>Frame summary</h2>
+        <table>
+          <tr><th>Field</th><th>Value</th></tr>
+          <tr><td>SOF</td><td>0x${formatHex(sof)}</td></tr>
+          <tr><td>Frame length</td><td>${length} (0x${formatHex(length, 4)})</td></tr>
+          <tr><td>Version / flags (byte 3)</td><td>0x${formatHex(version)}</td></tr>
+          <tr><td>Session / ACK / flags (byte 4)</td><td>0x${formatHex(sesAck)}</td></tr>
+          <tr><td>Sequence (bytes 5–7)</td><td>${seq} (0x${formatHex(seq, 6)})</td></tr>
+          <tr><td>Header CRC16 (bytes 8–9)</td><td>0x${formatHex(headerCrc, 4)}</td></tr>
+          <tr><td>CmdSet</td><td>0x${formatHex(cmdSet)} (${cmdSetName})</td></tr>
+          <tr><td>CmdId</td><td>0x${formatHex(cmdId)} (${cmdIdName})</td></tr>
+          <tr><td>Payload length</td><td>${payloadBytes.length} bytes</td></tr>
+          <tr><td>CRC32 (last 4 bytes)</td><td>0x${formatHex(crc32Value ?? 0, 8)}</td></tr>
+        </table>
+      </div>`;
+
+      // Payload + decoded table
+      html += `<div class="section">
+        <h2>Payload</h2>
+        <p><strong>Payload (hex):</strong> <code>${bytesToHex(payloadBytes)}</code></p>
+        <p><strong>Data (without CmdSet/CmdId):</strong> <code>${bytesToHex(dataBytes)}</code></p>
+        <h3>Decoded payload</h3>`;
+
+      if (payloadDecoded?.type) {
+        html += `<p><strong>Type:</strong> ${payloadDecoded.type}</p>`;
+      }
+      if (payloadDecoded?.note) {
+        html += `<p><strong>Note:</strong> ${payloadDecoded.note}</p>`;
+      }
+
+      html += `<table>
+        <tr>
+          <th>Field name</th>
+          <th>Value</th>
+          <th>Description</th>
+        </tr>`;
+
+      const fields = payloadDecoded?.fields || {};
+      for (const [name, field] of Object.entries(fields)) {
+        html += `<tr>
+          <td>${name}</td>
+          <td>${formatFieldValue(field)}</td>
+          <td>${field?.description || ""}</td>
+        </tr>`;
+      }
+
+      html += `</table></div>`;
+
+      container.innerHTML = html;
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+  </script>
+</body>
+</html>
