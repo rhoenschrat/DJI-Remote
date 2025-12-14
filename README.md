@@ -1,7 +1,7 @@
 # DJI-Remote – Multi-Camera Remote Control for DJI Osmo Action Cameras  
 ### Powered by M5Stack Basic V2.7 + Module GPS V2.0 (ESP32)
 
-![License](https://img.shields.io/github/license/rhoenschrat/DJI-Remote) ![Platform](https://img.shields.io/badge/platform-M5Stack%20Basic%20v2.7-orange) ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.0+-blue)
+![](https://img.shields.io/badge/version-V1.0.0-red.svg) ![License](https://img.shields.io/github/license/rhoenschrat/DJI-Remote) ![Platform](https://img.shields.io/badge/platform-M5Stack%20Basic%20v2.7-orange) ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.0+-blue)
 
 <img title="DJI-Remote" src="docs/images/dji-remote.jpg" alt="DJI-Reemote">
 
@@ -199,6 +199,22 @@ Windows:
 ```cmd
 idf.py -p COM3 flash monitor
 ```
+
+
+# ⚡ Flashing a Prebuilt Firmware (no ESP‑IDF)
+
+If you only want to install a published firmware binary, download the release ZIP (for example `dji-remote-v1.0.0.zip`) from GitHub and extract it anywhere. ESP‑IDF is not required.
+
+Inside the extracted folder you will see the flash scripts and `.bin` files.
+
+1) Download Espressif's [`esptool`](https://github.com/espressif/esptool/releases) (tested with 5.1.0) and place the executable into the extracted flash folder, next to the scripts and `.bin` files.  
+2) Connect the device via USB and note the serial port (`/dev/cu.usbserial-XXXX` on macOS, `COMx` on Windows).  
+3) macOS/Linux: in the extracted folder, run `./flash_mac.sh <port>`.  
+4) Windows: run `flash_win.bat COMx` from the extracted folder.  
+
+Flash layout for reference: `bootloader.bin` @ `0x1000`, `partition-table.bin` @ `0x8000`, app firmware @ `0x10000`.
+
+See the detailed instructions in `README.txt` of the release.
 
 
 # ⭐ Highlight Features
