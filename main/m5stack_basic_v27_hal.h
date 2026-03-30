@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "esp_lcd_types.h"
+#include "lvgl.h"
 
 /* M5Stack Basic V2.7 GPIO Pin Definitions (ESP32) */
 
@@ -102,66 +103,29 @@ void m5stack_basic_v27_display_set_brightness(uint8_t brightness);
 esp_lcd_panel_handle_t m5stack_basic_v27_get_display_handle(void);
 
 /**
- * @brief Clear display with specified color
+ * @brief Clear display with specified color (used during boot before LVGL starts)
  * @param color 16-bit RGB565 color
  */
 void m5stack_basic_v27_display_clear(uint16_t color);
 
 /**
- * @brief Show boot logo
- * Displays the 320x240 RGB565 boot logo stored in boot_logo.c
+ * @brief Turn the display backlight on
+ *
+ * Called by app_main after the LVGL splash screen has been rendered,
+ * ensuring the first visible frame is the splash (see ADR-010).
  */
-void m5stack_basic_v27_display_show_boot_logo(void);
+void m5stack_basic_v27_backlight_on(void);
 
 /**
- * @brief Print text on display
- * @param x X coordinate
- * @param y Y coordinate
- * @param text Text to display
- * @param color Text color (RGB565)
+ * @brief Initialize LVGL port with the existing display panel
+ *
+ * Must be called after m5stack_basic_v27_display_init(). Sets up LVGL core,
+ * creates a FreeRTOS task for lv_timer_handler(), and registers the
+ * ST7789 panel as an LVGL display with double-buffered DMA rendering.
+ *
+ * @return LVGL display handle, or NULL on failure
  */
-void m5stack_basic_v27_display_print(int x, int y, const char *text, uint16_t color);
-
-/**
- * @brief Print scaled text on display
- * @param x X coordinate
- * @param y Y coordinate
- * @param text Text to display
- * @param color Text color (RGB565)
- * @param scale Scale factor (1=normal, 2=double size, etc.)
- */
-void m5stack_basic_v27_display_print_scaled(int x, int y, const char *text, uint16_t color, int scale);
-
-/**
- * @brief Draw a bitmap using proper buffer-based approach
- * @param x X coordinate
- * @param y Y coordinate
- * @param width Bitmap width
- * @param height Bitmap height
- * @param bitmap Bitmap data
- * @param color Color for set bits
- * @param bg_color Background color for unset bits
- */
-void m5stack_basic_v27_display_draw_bitmap(int x, int y, int width, int height, const uint8_t *bitmap, uint16_t color, uint16_t bg_color);
-
-/**
- * @brief Draw a filled circle using buffer-based approach
- * @param x Center X coordinate
- * @param y Center Y coordinate
- * @param radius Circle radius
- * @param color Fill color (RGB565)
- */
-void m5stack_basic_v27_display_fill_circle(int x, int y, int radius, uint16_t color);
-
-/**
- * @brief Draw a filled rectangle
- * @param x X coordinate
- * @param y Y coordinate
- * @param width Rectangle width
- * @param height Rectangle height
- * @param color Fill color (RGB565)
- */
-void m5stack_basic_v27_display_fill_rect(int x, int y, int width, int height, uint16_t color);
+lv_display_t *m5stack_basic_v27_lvgl_init(void);
 
 /* Color definitions (RGB565 but display uses GBR ordering) */
 #define M5_COLOR_BLACK      0x0000

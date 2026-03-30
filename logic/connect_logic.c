@@ -250,7 +250,9 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
     ESP_LOGI(TAG, "Waiting up to 10s for characteristic handles discovery...");
     bool handles_found = false;
     for (int i = 0; i < 100; i++) { // 100 * 100ms = 10s
-        if (ble_get_notify_handle(camera_index) != 0 && ble_get_write_handle(camera_index) != 0) {
+        if (ble_get_notify_handle(camera_index) != 0 &&
+            ble_get_write_handle(camera_index) != 0 &&
+            ble_get_cccd_handle(camera_index) != 0) {
             ESP_LOGI(TAG, "Required characteristic handles found for camera %d", camera_index);
             handles_found = true;
             break;
@@ -346,7 +348,9 @@ int connect_logic_ble_connect_direct(int camera_index) {
     ESP_LOGI(TAG, "Waiting up to 10s for characteristic handles discovery...");
     bool handles_found = false;
     for (int i = 0; i < 100; i++) { // 100 * 100ms = 10s
-        if (ble_get_notify_handle(camera_index) != 0 && ble_get_write_handle(camera_index) != 0) {
+        if (ble_get_notify_handle(camera_index) != 0 &&
+            ble_get_write_handle(camera_index) != 0 &&
+            ble_get_cccd_handle(camera_index) != 0) {
             ESP_LOGI(TAG, "Required characteristic handles found for camera %d", camera_index);
             handles_found = true;
             break;
@@ -383,21 +387,21 @@ int connect_logic_ble_connect_direct(int camera_index) {
  * 
  * @return int Returns 0 on success, -1 on failure
  */
-int connect_logic_ble_disconnect(void) {
+int connect_logic_ble_disconnect(int camera_index) {
     connect_state_t old_state = connect_state;
     connect_state = BLE_DISCONNECTING;
-    
-    ESP_LOGI(TAG, "Disconnecting camera...");
 
-    // Call BLE layer's ble_disconnect function for camera 0
-    esp_err_t ret = ble_disconnect(0);
+    ESP_LOGI(TAG, "Disconnecting camera %d...", camera_index);
+
+    esp_err_t ret = ble_disconnect(camera_index);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to disconnect camera 0, BLE error: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to disconnect camera %d, BLE error: %s",
+                 camera_index, esp_err_to_name(ret));
         connect_state = old_state;
         return -1;
     }
 
-    ESP_LOGI(TAG, "Camera disconnected successfully");
+    ESP_LOGI(TAG, "Camera %d disconnected successfully", camera_index);
     return 0;
 }
 
@@ -468,7 +472,7 @@ int connect_logic_protocol_connect(int camera_index, uint32_t device_id, uint8_t
             if (camera_index >= 0 && camera_index < 3) {
                 s_slot_is_connecting[camera_index] = false;
             }
-            connect_logic_ble_disconnect();
+            connect_logic_ble_disconnect(camera_index);
             return -1;
         } else {
             // If data is received, skip parsing camera response and directly enter STEP3
@@ -484,7 +488,7 @@ int connect_logic_protocol_connect(int camera_index, uint32_t device_id, uint8_t
             s_slot_is_connecting[camera_index] = false;
         }
         free(response);
-        connect_logic_ble_disconnect();
+        connect_logic_ble_disconnect(camera_index);
         return -1;
     }
 
@@ -503,7 +507,7 @@ wait_for_camera_command:
         if (camera_index >= 0 && camera_index < 3) {
             s_slot_is_connecting[camera_index] = false;
         }
-        connect_logic_ble_disconnect();
+        connect_logic_ble_disconnect(camera_index);
         return -1;
     }
 
@@ -530,7 +534,7 @@ wait_for_camera_command:
             s_slot_is_connecting[camera_index] = false;
         }
         free(parse_result);
-        connect_logic_ble_disconnect();
+        connect_logic_ble_disconnect(camera_index);
         return -1;
     }
 
@@ -584,7 +588,7 @@ wait_for_camera_command:
             s_slot_is_connecting[camera_index] = false;
         }
         free(parse_result);
-        connect_logic_ble_disconnect();
+        connect_logic_ble_disconnect(camera_index);
         return -1;
     }
 }
@@ -702,7 +706,6 @@ void connect_logic_mark_slot_found(int slot_index) {
         extern ui_state_t g_ui_state;
         extern camera_state_t g_camera_states[NUM_CAMERAS];
         if (slot_index < NUM_CAMERAS) {
-            g_camera_states[slot_index].needs_full_redraw = true;
             g_ui_state.display_needs_update = true;
             ESP_LOGI(TAG, "Boot scan: Triggered UI update for slot %d (found state changed)", slot_index);
         }
@@ -899,7 +902,6 @@ int connect_logic_update_boot_scan(void) {
                     ESP_LOGD(TAG, "Boot scan: Camera %d snapshot_pending cleared (slot not found)", i);
                 }
                 g_camera_states[i].snapshot_pending = false;
-                g_camera_states[i].needs_full_redraw = true;
                 ESP_LOGI(TAG, "Boot scan: Slot %d not found, set to PAIRED_DISCONNECTED", i);
             }
         }

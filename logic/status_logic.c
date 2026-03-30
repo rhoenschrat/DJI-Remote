@@ -377,11 +377,7 @@ void update_camera_state_handler(int camera_index, void *data) {
         // The UI's selective update logic will handle what actually needs redrawing
         g_ui_state.display_needs_update = true;
         
-        // Only force full redraw on first initialization
-        // For subsequent updates, the UI's selective update logic handles it
-        if (was_just_initialized) {
-            cam_state->needs_full_redraw = true;
-        }
+        (void)was_just_initialized;
     }
 
     free(data);

@@ -1,13 +1,12 @@
 /*
  * DJI Camera Remote Control - User Interface Header
- * 
- * This header defines the user interface system for the DJI camera remote control.
- * The UI provides multi-camera control with partial screen redraws to minimize flicker.
- * 
+ *
+ * Defines the UI system for the DJI camera remote control.
+ * LVGL handles rendering and dirty-region tracking.
+ *
  * Main features:
  * - Multi-camera state management (up to 3 cameras)
  * - Screen-based navigation (Main, Pairing, Settings, Mode Switch)
- * - Partial redraw system for efficient display updates
  * - Wake-and-record state machine
  * - Wake queue for serialized camera wake-up in "All Cameras" mode
  */
@@ -18,8 +17,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "icons.h"
 #include "connect_logic.h"
+#include "ui_screen_main.h"
+#include "ui_screen_pairing.h"
+#include "ui_screen_settings.h"
+#include "ui_screen_mode_switch.h"
 
 // UI Screen definitions
 typedef enum {
@@ -40,6 +42,16 @@ typedef enum {
 
 // Multi-camera support constants
 #define NUM_CAMERAS 3
+
+// Camera selection for multi-camera control
+typedef enum {
+    CAMERA_SELECT_0 = 0,  // Camera 0 selected
+    CAMERA_SELECT_1,      // Camera 1 selected
+    CAMERA_SELECT_2,      // Camera 2 selected
+    CAMERA_SELECT_ALL     // All cameras selected
+} camera_selection_t;
+
+extern camera_selection_t g_camera_selection;
 
 // Wake-up queue state machine for serialized wake broadcasts in "All Cameras" mode
 typedef enum {
@@ -65,19 +77,6 @@ typedef enum {
     CAM_STATE_CONNECTED               /* Camera connected and ready */
 } camera_connection_state_t;
 
-// Status icon type enum for tracking last drawn icon
-typedef enum {
-    STATUS_ICON_NONE = 0,             /* No icon drawn (initial state) */
-    STATUS_ICON_BLUETOOTH_WHITE,      /* White bluetooth (unpaired) */
-    STATUS_ICON_BLUETOOTH_BLUE,       /* Blue bluetooth (paired but disconnected) */
-    STATUS_ICON_FOUND,                /* Green found icon (boot scan found) */
-    STATUS_ICON_CONNECTING,           /* Blue connecting icon */
-    STATUS_ICON_PAUSE,                /* White pause icon (connected, not recording) */
-    STATUS_ICON_RECORD,               /* Red record icon (connected, recording) */
-    STATUS_ICON_SLEEP                 /* White sleep icon (connected, sleeping) */
-} status_icon_type_t;
-
-// Forward declaration of camera state structure (full definition in ui.c)
 typedef struct camera_state_s {
     // Pairing information
     bool is_paired;
@@ -96,7 +95,7 @@ typedef struct camera_state_s {
     bool is_initialized;
     uint32_t last_status_timestamp;
     char model_name[64];
-    
+
     // Camera status fields
     uint8_t camera_mode;
     uint8_t camera_status;
@@ -110,51 +109,26 @@ typedef struct camera_state_s {
     uint16_t timelapse_interval;
     uint32_t remain_capacity;
     uint32_t remain_time;
-    uint8_t camera_bat_percentage;  /* Battery level 0-100% */
-    uint8_t battery_percentage;     /* Alias for compatibility */
+    uint8_t camera_bat_percentage;
+    uint8_t battery_percentage;
     int power_mode;
     bool is_sleeping;
-    uint32_t last_sleep_state_change_ms;  // Timestamp of last sleep state transition (milliseconds)
+    uint32_t last_sleep_state_change_ms;
     bool pending_start_recording;
-    bool snapshot_pending;  // True when snapshot has been requested for this camera slot
-    uint32_t last_snapshot_request_ms;  // Timestamp when snapshot was requested (milliseconds)
-    uint8_t wake_retry_count;  // Number of wake broadcast retries attempted (0 = first attempt, max 1 retry)
+    bool snapshot_pending;
+    uint32_t last_snapshot_request_ms;
+    uint8_t wake_retry_count;
 
     // New Camera Status Push (1D06) fields
     // camera_supports_new_status_push: Per-slot flag that tracks whether this camera sends 1D06.
-    // - Starts as false for all slots at initialization.
-    // - Set to true when the first valid 1D06 is received for this slot.
-    // - Once true, it stays true for the entire pairing session (never reverts to false).
-    // - When true: Video Mode Area is updated ONLY from 1D06 (mode_name, mode_param).
-    // - When false: Video Mode Area is updated from 1D02 (video_resolution, fps_idx, eis_mode).
-    // - Camera Mode icon is ALWAYS updated from 1D02 camera_mode field, regardless of this flag.
+    // When true: Video Mode Area uses mode_name/mode_param from 1D06.
+    // When false: Video Mode Area uses video_resolution/fps_idx/eis_mode from 1D02.
+    // Camera Mode icon is ALWAYS derived from 1D02 camera_mode, regardless of this flag.
     bool camera_supports_new_status_push;
-    char mode_name[21];  // Mode name from 1D06 (null-terminated)
-    char mode_param[21];  // Mode parameter from 1D06 (null-terminated)
-    char last_mode_name[21];  // Track last drawn mode_name for change detection
-    char last_mode_param[21];  // Track last drawn mode_param for change detection
-
-    // UI state tracking for partial redraws
-    // last_drawn_* fields track what was actually rendered on screen to enable change detection.
-    // These are separate from the current state values to detect when a redraw is needed.
-    // Initialized to 0xFF (sentinel) or empty string to guarantee first-use redraw.
-    char last_drawn_model_name[32];       // Last drawn model_name (for camera title)
-    uint8_t last_drawn_camera_mode;       // Last drawn camera_mode (for Camera Mode icon)
-    uint8_t last_drawn_video_resolution;  // Last drawn video_resolution (for Video Mode Area from 1D02)
-    uint8_t last_drawn_fps_idx;           // Last drawn fps_idx (for Video Mode Area from 1D02)
-    uint8_t last_drawn_eis_mode;          // Last drawn eis_mode (for Video Mode Area from 1D02)
-    status_icon_type_t last_drawn_status_icon;  // Last drawn status icon type (for Camera Status Area)
-    
-    char last_resolution_fps[64];
-    char last_sd_display[20];
-    char last_battery_display[20];
-    uint16_t last_time_value;
-    bool last_recording_state;
-    bool last_sleep_state;  // Track what sleep state was actually drawn (for change detection)
-    bool needs_full_redraw;
-    uint8_t last_sd_color_category;
-    uint8_t last_battery_color_category;
-    uint8_t last_battery_icon_index;
+    char mode_name[21];
+    char mode_param[21];
+    char last_mode_name[21];
+    char last_mode_param[21];
 } camera_state_t;
 
 // Global camera states array
@@ -164,22 +138,10 @@ extern camera_state_t g_camera_states[NUM_CAMERAS];
 typedef struct {
     ui_screen_t current_screen;
     bool display_needs_update;
-    bool is_plus2_device;
-    float scale_factor;
-    int scaled_text_size;
 } ui_state_t;
-
-// Screen layout structure for different device sizes
-typedef struct {
-    int icon_x, icon_y;           // Icon position
-    int text_x, text_y;           // Text position  
-    int status_x, status_y;       // Connection status position
-    int connection_radius;        // Status circle radius
-} screen_layout_t;
 
 // Global UI state
 extern ui_state_t g_ui_state;
-extern screen_layout_t g_layout;
 
 // Wake-up queue state (for serialized wake broadcasts in "All Cameras" mode)
 extern wake_queue_t g_wake_queue;
@@ -187,9 +149,17 @@ extern wake_queue_state_t g_wake_queue_state;
 extern int g_current_wake_camera_index;  // Camera currently being woken (-1 if none)
 extern uint32_t g_wake_broadcast_start_time_ms;  // Timestamp when current broadcast started
 
+// LVGL screen management
+/**
+ * Switch active LVGL screen.  Acquires lvgl_port_lock internally.
+ * Currently a no-op wrapper that sets g_ui_state.current_screen.
+ * Phase 4/5 will load the corresponding LVGL screen via lv_screen_load().
+ */
+void ui_switch_screen(ui_screen_t screen);
+
 // UI Function declarations
+void ui_early_init(void);
 void ui_init(void);
-void ui_detect_device_and_set_scale(void);
 void ui_auto_connect_on_startup(void);
 void ui_initiate_boot_scan_connections(void);
 int ui_attempt_background_reconnection(void);
@@ -199,10 +169,6 @@ void ui_cycle_camera_selection(void);
 void ui_show_message(const char* message, uint16_t color, int duration_ms);
 void ui_show_shutter_bottom_message(const char* message, uint16_t color, int duration_ms);
 void ui_show_not_connected_message(void);
-void ui_draw_bitmap(int16_t x, int16_t y, const uint8_t *bitmap, int16_t w, int16_t h, uint16_t color);
-void ui_draw_connection_status(void);
-void ui_draw_gps_status(void);
-int ui_get_text_width(const char* text, int text_size);
 const char* ui_get_camera_model_name(uint32_t device_id);
 esp_err_t save_all_cameras_to_nvs(void);
 void ui_process_pending_gpio_actions(void);
@@ -234,6 +200,7 @@ void ui_screen_main(void);
 // Multi-camera pairing and settings
 void ui_start_pairing(int camera_index);
 void ui_pairing_add_discovered_camera(const char *name, const uint8_t *mac, int8_t rssi, uint32_t device_id);
+void ui_pairing_update_discovered_camera_name(const char *name, const uint8_t *mac);
 void ui_start_settings(int camera_index);
 
 // Screen-aware button handlers

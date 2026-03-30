@@ -54,7 +54,8 @@ If a paired camera did not connect:
 1. Select its slot using **Button B**.
 2. Press **Button A** (“Connect”).
 
-A focused reconnect scan for that specific camera begins.
+The camera status icon changes to **connecting** immediately, and a focused
+reconnect scan for that specific camera begins.
 
 
 # 2. Single-Camera Mode
@@ -110,7 +111,8 @@ Use **Button B** to navigate, **Button A** to select.
 
 ## 2.5 Snapshot While Sleeping
 
-If the selected camera is asleep:
+If the selected camera is asleep, **Button A** shows the record icon with the
+label **"Snapsht"** (short for Snapshot):
 
 1. Press **Button A**.  
 2. The remote sends a **Wake** command.  
@@ -172,7 +174,8 @@ This ensures high reliability across multiple models.
 
 ## 3.5 Snapshot in Multi-Camera Mode
 
-If cameras are asleep and you press **Button A**:
+If all connected cameras are asleep, **Button A** shows the label **"Snapsht"**
+(short for Snapshot). Pressing it:
 
 - Each sleeping camera is woken one at a time  
 - After waking, it receives a **Snapshot** command  

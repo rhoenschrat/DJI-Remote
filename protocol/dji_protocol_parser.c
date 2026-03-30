@@ -258,7 +258,7 @@ void *protocol_parse_data(const uint8_t *data, size_t data_length, uint8_t cmd_t
     }
     else if (result == -2)
     {
-        ESP_LOGW(TAG, "Parser function is NULL for CmdSet 0x%02X and CmdID 0x%02X by trying structure descriptor", cmd_set, cmd_id);
+        ESP_LOGD(TAG, "No parser for CmdSet 0x%02X, CmdID 0x%02X (send-only command)", cmd_set, cmd_id);
         free(response_struct);
         return NULL;
     }
