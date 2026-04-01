@@ -57,6 +57,8 @@ typedef struct {
         int32_t notif_w;
         int32_t gps_icon_x, gps_icon_y;
         int32_t gps_text_x, gps_text_y;
+        lv_color_t gps_fix_color;    /* Yellow for 320x240, Green for 320x170 */
+        bool       gps_text_visible; /* false on 320x170 (icon-only) */
     } status;
 
     /* Button bar (shared across screens) */
@@ -78,12 +80,30 @@ typedef struct {
         int32_t entry_spacing;
         int32_t indicator_w;
         int32_t icon_ofs_x;
+        int32_t icon_ofs_y;
         int32_t label_ofs_x;
         int32_t label_ofs_y;
         int32_t max_entries;
         int32_t notif_x, notif_y;
         int32_t notif_w;
     } submenu;
+
+    /* Compact button bar (320x170): square icon-only buttons, no label */
+    struct {
+        bool       compact;          /* true = 27x27 square, false = wide with label */
+        lv_color_t bg_color[3];      /* per-button background colors */
+        int32_t    icon_ofs_x;       /* icon x offset within button */
+        int32_t    icon_ofs_y;       /* icon y offset within button */
+        int32_t    icon_size;        /* icon size (20 for 320x170) */
+    } btn_style;
+
+    /* Submenu button column (320x170: vertical right-edge column) */
+    struct {
+        bool    column;              /* true = right-edge column, false = bottom bar */
+        int32_t col_x;              /* x of the column */
+        int32_t col_btn_h[3];       /* height of each button slot */
+        int32_t col_btn_y[3];       /* y of each button slot */
+    } submenu_btns;
 
     /* Mode switch screen */
     struct {

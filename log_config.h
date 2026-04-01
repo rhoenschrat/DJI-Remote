@@ -44,7 +44,7 @@ typedef enum {
  *   - Production: APP_LOG_LEVEL_ERROR or APP_LOG_LEVEL_NONE
  */
 #ifndef APP_DEFAULT_LOG_LEVEL
-#define APP_DEFAULT_LOG_LEVEL APP_LOG_LEVEL_ERROR
+#define APP_DEFAULT_LOG_LEVEL APP_LOG_LEVEL_INFO
 #endif
 
 /**

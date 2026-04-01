@@ -65,7 +65,8 @@ static void create_entry(int idx) {
     lv_obj_clear_flag(e->indicator, LV_OBJ_FLAG_SCROLLABLE);
 
     e->icon = lv_image_create(s_screen);
-    lv_obj_set_pos(e->icon, L->submenu.base_x + L->submenu.icon_ofs_x, y);
+    lv_obj_set_pos(e->icon, L->submenu.base_x + L->submenu.icon_ofs_x,
+                   y + L->submenu.icon_ofs_y);
     ui_style_img_recolor(e->icon, ui_clr_white());
 
     e->label = lv_label_create(s_screen);
@@ -82,24 +83,46 @@ static void create_button(btn_widget_t *b, int btn_idx,
 
     b->container = lv_obj_create(s_screen);
     lv_obj_remove_style_all(b->container);
-    lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
-    lv_obj_set_size(b->container, L->btn.w, L->btn.h);
-    lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
+
+    if (L->submenu_btns.column) {
+        lv_obj_set_pos(b->container,
+                       L->submenu_btns.col_x,
+                       L->submenu_btns.col_btn_y[btn_idx]);
+        lv_obj_set_size(b->container, 27, L->submenu_btns.col_btn_h[btn_idx]);
+    } else {
+        lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
+        lv_obj_set_size(b->container, L->btn.w, L->btn.h);
+    }
+
+    lv_color_t bg = L->btn_style.compact
+                    ? L->btn_style.bg_color[btn_idx]
+                    : ui_clr_black();
+    lv_obj_set_style_bg_color(b->container, bg, 0);
     lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b->container, 0, 0);
     lv_obj_set_scrollbar_mode(b->container, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(b->container, LV_OBJ_FLAG_SCROLLABLE);
 
     b->icon = lv_image_create(b->container);
-    lv_obj_set_pos(b->icon, 0, 0);
+    lv_obj_set_pos(b->icon, L->btn_style.icon_ofs_x, L->btn_style.icon_ofs_y);
     lv_image_set_src(b->icon, ico);
-    ui_style_img_recolor(b->icon, ui_clr_white());
+    ui_style_img_recolor(b->icon, L->btn_style.compact ? ui_clr_black() : ui_clr_white());
 
-    b->label = lv_label_create(b->container);
-    lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
-    lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(b->label, L->font_body, 0);
-    lv_label_set_text(b->label, lbl);
+    /* Rotate Button B (next_icon) 90° CW to point downward on all targets. */
+    if (btn_idx == 1) {
+        lv_image_set_pivot(b->icon, 12, 12);
+        lv_image_set_rotation(b->icon, 900);
+    }
+
+    if (!L->btn_style.compact) {
+        b->label = lv_label_create(b->container);
+        lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
+        lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(b->label, L->font_body, 0);
+        lv_label_set_text(b->label, lbl);
+    } else {
+        b->label = NULL;
+    }
 }
 
 /* ======================================================================
@@ -126,15 +149,19 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Title */
-    s_title = lv_label_create(s_screen);
-    lv_obj_set_pos(s_title, L->submenu.base_x,
-                   L->submenu.base_y + L->submenu.title_ofs_y);
-    lv_obj_set_width(s_title, L->submenu.w);
-    lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_title, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(s_title, L->font_heading, 0);
-    lv_label_set_text_fmt(s_title, "Camera %d", camera_index + 1);
+    /* Title — omitted on 320x170 (column layout uses full height for entries) */
+    if (!L->submenu_btns.column) {
+        s_title = lv_label_create(s_screen);
+        lv_obj_set_pos(s_title, L->submenu.base_x,
+                       L->submenu.base_y + L->submenu.title_ofs_y);
+        lv_obj_set_width(s_title, L->submenu.w);
+        lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_title, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(s_title, L->font_heading, 0);
+        lv_label_set_text_fmt(s_title, "Camera %d", camera_index + 1);
+    } else {
+        s_title = NULL;
+    }
 
     /* Menu entries */
     for (int i = 0; i < s_entry_count; i++) {
@@ -151,14 +178,18 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
         lv_label_set_text(s_entries[1].label, "Mode Switch");
     }
 
-    /* Notification area */
-    s_notification = lv_label_create(s_screen);
-    lv_obj_set_pos(s_notification, L->submenu.notif_x, L->submenu.notif_y);
-    lv_obj_set_width(s_notification, L->submenu.notif_w);
-    lv_obj_set_style_text_color(s_notification, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(s_notification, L->font_body, 0);
-    lv_label_set_long_mode(s_notification, LV_LABEL_LONG_CLIP);
-    lv_label_set_text(s_notification, "");
+    /* Notification area — omitted on 320x170 (no space) */
+    if (L->submenu.notif_w > 0) {
+        s_notification = lv_label_create(s_screen);
+        lv_obj_set_pos(s_notification, L->submenu.notif_x, L->submenu.notif_y);
+        lv_obj_set_width(s_notification, L->submenu.notif_w);
+        lv_obj_set_style_text_color(s_notification, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(s_notification, L->font_body, 0);
+        lv_label_set_long_mode(s_notification, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_notification, "");
+    } else {
+        s_notification = NULL;
+    }
 
     /* Button bar */
     create_button(&s_btn_a, 0, &lvgl_select_icon, "Select");

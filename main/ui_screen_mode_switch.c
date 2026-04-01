@@ -68,24 +68,46 @@ static void create_button(btn_widget_t *b, int btn_idx,
 
     b->container = lv_obj_create(s_screen);
     lv_obj_remove_style_all(b->container);
-    lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
-    lv_obj_set_size(b->container, L->btn.w, L->btn.h);
-    lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
+
+    if (L->submenu_btns.column) {
+        lv_obj_set_pos(b->container,
+                       L->submenu_btns.col_x,
+                       L->submenu_btns.col_btn_y[btn_idx]);
+        lv_obj_set_size(b->container, 27, L->submenu_btns.col_btn_h[btn_idx]);
+    } else {
+        lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
+        lv_obj_set_size(b->container, L->btn.w, L->btn.h);
+    }
+
+    lv_color_t bg = L->btn_style.compact
+                    ? L->btn_style.bg_color[btn_idx]
+                    : ui_clr_black();
+    lv_obj_set_style_bg_color(b->container, bg, 0);
     lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b->container, 0, 0);
     lv_obj_set_scrollbar_mode(b->container, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(b->container, LV_OBJ_FLAG_SCROLLABLE);
 
     b->icon = lv_image_create(b->container);
-    lv_obj_set_pos(b->icon, 0, 0);
+    lv_obj_set_pos(b->icon, L->btn_style.icon_ofs_x, L->btn_style.icon_ofs_y);
     lv_image_set_src(b->icon, ico);
-    ui_style_img_recolor(b->icon, ui_clr_white());
+    ui_style_img_recolor(b->icon, L->btn_style.compact ? ui_clr_black() : ui_clr_white());
 
-    b->label = lv_label_create(b->container);
-    lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
-    lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(b->label, L->font_body, 0);
-    lv_label_set_text(b->label, lbl);
+    /* Rotate Button B (next_icon) 90° CW to point downward on all targets. */
+    if (btn_idx == 1) {
+        lv_image_set_pivot(b->icon, 12, 12);
+        lv_image_set_rotation(b->icon, 900);
+    }
+
+    if (!L->btn_style.compact) {
+        b->label = lv_label_create(b->container);
+        lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
+        lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(b->label, L->font_body, 0);
+        lv_label_set_text(b->label, lbl);
+    } else {
+        b->label = NULL;
+    }
 }
 
 /* ======================================================================
@@ -108,15 +130,19 @@ lv_obj_t *ui_screen_mode_switch_create(int camera_index) {
     lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Title */
-    s_title = lv_label_create(s_screen);
-    lv_obj_set_pos(s_title, L->submenu.base_x,
-                   L->submenu.base_y + L->submenu.title_ofs_y);
-    lv_obj_set_width(s_title, L->submenu.w);
-    lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(s_title, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(s_title, L->font_heading, 0);
-    lv_label_set_text_fmt(s_title, "Camera %d", camera_index + 1);
+    /* Title — omitted on 320x170 (column layout uses full height) */
+    if (!L->submenu_btns.column) {
+        s_title = lv_label_create(s_screen);
+        lv_obj_set_pos(s_title, L->submenu.base_x,
+                       L->submenu.base_y + L->submenu.title_ofs_y);
+        lv_obj_set_width(s_title, L->submenu.w);
+        lv_obj_set_style_text_align(s_title, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(s_title, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(s_title, L->font_heading, 0);
+        lv_label_set_text_fmt(s_title, "Camera %d", camera_index + 1);
+    } else {
+        s_title = NULL;
+    }
 
     /* Camera mode icon (centered) */
     s_mode_icon = lv_image_create(s_screen);

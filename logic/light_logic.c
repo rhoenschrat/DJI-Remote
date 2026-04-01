@@ -9,15 +9,13 @@
 
 #define TAG "LOGIC_LIGHT"
 
-#if defined(CONFIG_IDF_TARGET_ESP32) && defined(M5STICKC_PLUS2)
-/* M5StickC Plus2 internal LED */
-#define LED_GPIO 10               // M5StickC Plus2 internal LED on GPIO 10
-#elif defined(CONFIG_IDF_TARGET_ESP32C6)
-/* ESP32-C6 LED */
-#define LED_GPIO 8                // Use GPIO to control RGB LED
+/* LED GPIO — board-specific via Kconfig board selector */
+#if defined(CONFIG_BOARD_M5STACK_BASIC_V27)
+#define LED_GPIO 2                /* M5Stack Basic WS2812 GPIO */
+#elif defined(CONFIG_BOARD_WAVESHARE_S3_LCD19)
+#define LED_GPIO 15               /* Waveshare onboard WS2812 (2 LEDs) */
 #else
-/* Default LED */
-#define LED_GPIO 2                // Default LED GPIO
+#define LED_GPIO 2                /* Fallback default */
 #endif
 
 #define LED_STRIP_LENGTH 1        // Set the number of LEDs to 1

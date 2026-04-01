@@ -52,6 +52,7 @@
 #include "driver/gpio.h"
 #include "freertos/queue.h"
 #include "esp_lvgl_port.h"
+#include "ui_layout.h"
 
 /* Logging tag for ESP_LOG functions */
 #define TAG "UI"
@@ -96,7 +97,13 @@
  * 
  * Default: 1 (external buttons enabled)
  */
+#if defined(CONFIG_BOARD_WAVESHARE_S3_LCD19)
+/* Waveshare ESP32-S3 has no external button header; GPIOs 22/25 do not exist
+ * on this chip (used internally for SPI flash/PSRAM interface). */
+#define UI_ENABLE_EXTERNAL_BUTTONS 0
+#else
 #define UI_ENABLE_EXTERNAL_BUTTONS 1
+#endif
 
 /* Enumeration of GPIO trigger types for external hardware integration
  * These correspond to the three main camera functions that can be
@@ -1429,7 +1436,8 @@ void ui_init(void) {
  * Sets display scaling factors for optimal rendering on 320x240 display.
  */
 static void ui_detect_device_and_set_scale(void) {
-    ESP_LOGI(TAG, "Detected: M5Stack Basic V2.7 (320x240)");
+    const ui_layout_t *L = ui_layout_get();
+    ESP_LOGI(TAG, "Detected: %ldx%ld display", (long)L->screen_w, (long)L->screen_h);
 }
 
 /* Old draw functions (ui_draw_bitmap, ui_draw_bitmap_inverted, ui_draw_connection_status,
