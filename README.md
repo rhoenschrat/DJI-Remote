@@ -1,7 +1,7 @@
 # DJI-Remote – Multi-Camera Remote Control for DJI Osmo Action Cameras  
 ### Powered by M5Stack Basic V2.7 + Module GPS V2.0 (ESP32)
 
-![](https://img.shields.io/badge/version-V1.0.0-red.svg) ![License](https://img.shields.io/github/license/rhoenschrat/DJI-Remote) ![Platform](https://img.shields.io/badge/platform-M5Stack%20Basic%20v2.7-orange) ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.0+-blue)
+![](https://img.shields.io/badge/version-V1.1.0-red.svg) ![License](https://img.shields.io/github/license/rhoenschrat/DJI-Remote) ![Platform](https://img.shields.io/badge/platform-M5Stack%20Basic%20v2.7-orange) ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5.1-blue)
 
 <img title="DJI-Remote" src="docs/images/dji-remote.jpg" alt="DJI-Reemote">
 
@@ -19,6 +19,7 @@ It is based on:
 - [**M5Stack Basic V2.7**](https://docs.m5stack.com/en/core/basic_v2.7)  
 - [**M5Stack Module GPS v2.0**](https://docs.m5stack.com/en/module/Module%20GPS%20v2.0)  
 - **ESP-IDF (ESP32)**
+- **LVGL 9.5.0** (UI rendering via esp_lvgl_port)
 
 Features include:
 
@@ -30,7 +31,7 @@ Features include:
 - Automatic boot-time scanning & reconnection  
 - Multi-camera action coordination  
 - Live GPS injection to all connected cameras  
-- Flicker-free UI with partial redraws  
+- LVGL-based UI with hardware-accelerated rendering
 - **Optional external buttons (GPIO)**
 
 
@@ -68,7 +69,7 @@ DJI-Remote significantly extends the concept with:
 |------|---------|
 | [`manual.md`](docs/manual.md) | **User Manual** – How to operate the remote |
 | [`implementation.md`](docs/implementation.md) | **Developer Documentation** – Firmware architecture & internals |
-| [`THIRD_PARTY_NOTICES.md`](THIRD_PARY_NOTICES.md) | Licenses for DJI, ESP-IDF, external code |
+| [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) | Licenses for DJI, ESP-IDF, LVGL, NimBLE and other external code |
 | [`LICENSE`](LICENSE) | MIT license for this project |
 
 
@@ -199,6 +200,13 @@ Windows:
 ```cmd
 idf.py -p COM3 flash monitor
 ```
+
+
+# ⚡ Web Flash (Easiest)
+
+Download `dji-remote-merged.bin` from the [latest release](https://github.com/rhoenschrat/DJI-Remote/releases/latest)
+and open [espflash.app](https://espflash.app) in a Chrome or Edge browser.
+Select the port, load the `.bin` file, and flash — no toolchain required.
 
 
 # ⚡ Flashing a Prebuilt Firmware (no ESP‑IDF)

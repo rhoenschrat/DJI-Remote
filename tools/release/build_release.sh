@@ -6,7 +6,7 @@
 # Run after a successful "idf.py build". Produces:
 #   release/dji-remote-merged.bin          — single binary for espflash.app
 #   release/DJI-Remote-v{VERSION}-esp32.zip — full package (bins + manifest + flash scripts)
-#   release/RELEASE_NOTES.md               — release description template
+#   release/RELEASE_NOTES.md               — copied from RELEASE_NOTES.md at repo root
 #
 # VERSION defaults to "dev" if not provided.
 
@@ -97,30 +97,13 @@ cd "$RELEASE_DIR"
 zip -r "DJI-Remote-v${VERSION}-esp32.zip" package/
 
 # ---------------------------------------------------------------------------
-# 6. Generate release notes
+# 6. Copy release notes from repo root
 # ---------------------------------------------------------------------------
-cat > "$RELEASE_DIR/RELEASE_NOTES.md" <<EOF
-## DJI-Remote v${VERSION}
-
-Firmware for M5Stack Basic V2.7 (ESP32).
-
-### Flash Options
-
-**Option 1 — Web Flash (easiest)**
-Use [espflash.app](https://espflash.app) or [ESP Web Tools](https://web.esptool.io/)
-with the merged binary \`dji-remote-merged.bin\`.
-
-**Option 2 — Manual Flash**
-Download the ZIP, extract, and follow the instructions in \`README.txt\`.
-
-### Flash Settings
-| Setting | Value |
-|---------|-------|
-| Chip | ESP32 |
-| Flash mode | DIO |
-| Flash size | 16 MB |
-| Flash frequency | 80 MHz |
-EOF
+if [ ! -f "$PROJECT_ROOT/RELEASE_NOTES.md" ]; then
+    echo "WARNING: $PROJECT_ROOT/RELEASE_NOTES.md not found — skipping." >&2
+else
+    cp "$PROJECT_ROOT/RELEASE_NOTES.md" "$RELEASE_DIR/RELEASE_NOTES.md"
+fi
 
 echo ""
 echo "Release artifacts created in $RELEASE_DIR/"

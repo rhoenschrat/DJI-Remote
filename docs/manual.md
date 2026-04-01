@@ -5,7 +5,7 @@ This manual explains how to operate the DJI-Remote device, covering startup beha
 
 # 1. Starting the Remote
 
-When powering on, the device shows a boot logo and then loads the **Main Screen**.  
+When powering on, the device shows a splash screen and then loads the **Main Screen**.  
 Startup behavior differs depending on whether cameras were previously paired.
 
 

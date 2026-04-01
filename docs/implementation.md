@@ -15,7 +15,7 @@ Main components:
 
 - **BLE connection & command logic** for DJI cameras  
 - **GPS reader**, NMEA parser, and GPS‑push system  
-- **UI subsystem** with partial redraw logic to avoid flicker  
+- **UI subsystem** using LVGL 9.5.0 with widget-based rendering and automatic dirty-region tracking
 - **HAL layer** for display, buttons, and board‑specific hardware  
 - **Camera state & notification parsing** (DJI protocols 1D02 and 1D06)  
 - **Startup scanning & reconnect logic**  
@@ -46,15 +46,10 @@ When enabled, these behave **identically** to internal Buttons A/B/C across all 
 
 ## 2.3 Hardware Abstraction Layer (HAL)
 
-Platform implements drawing primitives:
-
-- `hal_fill_rect()`
-- `hal_draw_bitmap()`
-- `hal_draw_text()`
-- backlight and display‑init routines  
-- no direct TFT calls in UI code
-
-A clean separation ensures portability and predictable rendering timing.
+The HAL initializes the display (ST7789 via SPI), configures the backlight,
+registers hardware buttons, and registers the display and input drivers with
+the LVGL `esp_lvgl_port`. All rendering goes through LVGL widgets; the HAL
+does not expose drawing functions to UI code.
 
 
 # 3. Firmware Structure
@@ -62,9 +57,16 @@ A clean separation ensures portability and predictable rendering timing.
 ```
 main/
  ├── app_main.c                    → Init, main loop, subsystem startup
- ├── ui.c/.h                       → All UI rendering & state machine
- ├── m5stack_basic_v27_hal.c/.h    → M5Stack display, buttons, drawing
- └── icons.h/.c                    → Packed 1‑bit icon bitmaps
+ ├── ui.c/.h                       → UI router — delegates to LVGL screen modules
+ ├── ui_layout.c/.h                → Centralized layout presets (320x240, 240x135)
+ ├── ui_screen_main.c/.h           → Main shutter screen (LVGL)
+ ├── ui_screen_pairing.c/.h        → Pairing screen (LVGL)
+ ├── ui_screen_settings.c/.h       → Settings screen (LVGL)
+ ├── ui_screen_mode_switch.c/.h    → Mode switch screen (LVGL)
+ ├── ui_screen_splash.c/.h         → Boot splash screen (LVGL)
+ ├── lvgl_icons.c/.h               → LVGL A8 image descriptors for all icons
+ ├── splash_logo.c/.h              → Splash logo image data
+ └── m5stack_basic_v27_hal.c/.h    → M5Stack display, buttons, LVGL port registration
 
 logic/
  ├── connect_logic.c/.h            → BLE scanning & connect/reconnect logic
@@ -94,21 +96,11 @@ log_config.c/.h                   → Central logging system (root level)
 
 # 4. User Interface
 
-The UI avoids full‑screen redraws. Everything is drawn in **sections**, and updates only happen when needed.
-
-## 4.1 Screen Layout
-
-Resolution: **320×240**
-
-Sections:
-
-1. **Three Camera Blocks** (0–2)
-2. **Remote Status Area**  
-   - Notification Area  
-   - GPS Status Area  
-3. **Buttons Area** (A/B/C, dynamic icons & labels)
-
-Only the affected sub‑region is redrawn when state changes.
+All UI elements are LVGL widgets (labels, images, containers). LVGL tracks
+dirty regions automatically; the firmware does not manage redraws. Screen
+modules follow a `create()` / `update()` / `destroy()` pattern. All `lv_*`
+calls from non-LVGL tasks must be wrapped in `lvgl_port_lock(0)` /
+`lvgl_port_unlock()`.
 
 ## 4.2 Camera Block Structure
 
@@ -123,7 +115,7 @@ Each camera block contains:
 - SD card info  
 - Battery info  
 
-Every section has independent redraw triggers and tracking fields.
+LVGL automatically tracks which fields need redrawing.
 
 ## 4.3 Buttons Area
 
@@ -178,7 +170,8 @@ Race‑free by centralizing snapshot sending inside `status_logic.c`.
 
 # 6. BLE Architecture
 
-DJI‑Remote uses the ESP32 as a **GATT client**.
+The BLE stack is **Apache NimBLE** (included via ESP-IDF). The firmware acts
+as a **GATT client**.
 
 ## 6.1 Scan Modes
 
@@ -239,7 +232,7 @@ Selection model:
 
 - Camera 0 → 1 → 2 → All Cameras → …
 
-All rendering is partial and flicker‑free.
+All rendering is handled by LVGL widgets.
 
 ## 8.2 Pairing Screen
 
@@ -278,30 +271,25 @@ Live updates handled via 1D02 / 1D06 notifications.
 
 # 9. Icons & Graphics
 
-Icons are 1‑bit packed arrays in `icons.h`.  
-Rendering rules:
-
-- Recording → red  
-- GPS fix → yellow  
-- Sleep → white  
-- Bluetooth (found/paired) → blue/green  
-
-Battery & SD icons follow threshold‑based color logic.
+Icons are stored as LVGL A8 (alpha-8) image descriptors in `lvgl_icons.h`
+and rendered via `lv_image_set_src()`. Color is applied at render time using
+LVGL styles. Detailed color rules are documented in `docs/ui/UI-SPEC.md`.
 
 
 # 10. State Update & Redraw Rules
 
 ## 10.1 Flicker Avoidance
 
-- Never redraw full screen  
-- Never redraw full camera block unless required  
-- Always clear/redraw only the minimal region  
-- Use per‑field tracking variables to detect changes  
-- Insert small delays (`vTaskDelay(1)`) when drawing multiple regions quickly (ST7789 timing requirement)
+LVGL handles dirty-region detection and partial screen updates automatically.
+The firmware does not need manual redraw coordination; setting a widget
+property to its current value is a no-op.
 
 ## 10.2 Concurrency Safety
 
-UI must capture state values into **local copies** before drawing to avoid race conditions with the status task.
+All LVGL widget updates must be wrapped in `lvgl_port_lock(0)` /
+`lvgl_port_unlock()`. Capturing state into local variables before entering
+the lock is recommended to keep lock sections short and avoid TOCTOU races
+with the notification task.
 
 
 # 11. Camera Status Protocols
@@ -364,7 +352,7 @@ GPS module also uses this system; logging can be fully disabled.
 # 13. Boot Behavior
 
 - Display initializes  
-- Boot logo drawn completely before enabling backlight  
+- The splash screen is an LVGL screen rendered by `ui_screen_splash`. The HAL enables the backlight after LVGL completes the first splash frame.
 - Autoconnect boot scan may run  
 - Buttons area shows special temporary state  
 - After connections complete, normal UI resumes  
@@ -373,7 +361,7 @@ GPS module also uses this system; logging can be fully disabled.
 # 14. Developer Notes
 
 - HAL abstraction is mandatory  
-- All UI changes must follow partial redraw rules  
+- All UI changes must use LVGL widgets and respect thread safety (`lvgl_port_lock`/`unlock`)
 - BLE/scanning logic is slot‑based and deterministic  
 - Multi‑camera operations must treat slots independently  
 - No background reconnection; user‑triggered reconnect only  

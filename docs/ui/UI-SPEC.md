@@ -241,7 +241,20 @@ Indicator: Red if selected, Black if not.
 
 ---
 
-## 7. Color Reference
+## 7. Splash Screen
+
+| Region | X | Y | Width | Height |
+|--------|---|---|-------|--------|
+| Full screen | 0 | 0 | 320 | 240 |
+
+- Background: Black
+- Logo: `splash_logo` image descriptor, centered
+- Rendered by `ui_screen_splash`; destroyed when boot completes and Main Screen loads
+- HAL enables backlight after the first LVGL flush of this screen
+
+---
+
+## 8. Color Reference
 
 ### Default Colors
 
