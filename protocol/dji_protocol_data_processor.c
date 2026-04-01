@@ -41,7 +41,7 @@ int data_parser_by_structure(uint8_t cmd_set, uint8_t cmd_id, uint8_t cmd_type, 
 
     // Check if parser function exists
     if (descriptor->parser == NULL) {
-        ESP_LOGW(TAG, "Parser function is NULL for CmdSet: 0x%02X, CmdID: 0x%02X", cmd_set, cmd_id);
+        ESP_LOGD(TAG, "No parser registered for CmdSet: 0x%02X, CmdID: 0x%02X (send-only command)", cmd_set, cmd_id);
         return -2;
     }
 

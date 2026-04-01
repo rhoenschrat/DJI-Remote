@@ -1,4 +1,6 @@
 dependencies:
   espressif/led_strip: "^2.4.1"
+  lvgl/lvgl: "^9"
+  espressif/esp_lvgl_port: "^2.7.2"
   idf:
     version: ">=5.0.0"

@@ -30,7 +30,6 @@
  */
 
 #include "m5stack_basic_v27_hal.h"
-#include "boot_logo.h"
 #include "driver/gpio.h"
 /* I2C driver not currently used - sensors not implemented
  * #include "driver/i2c.h"
@@ -43,7 +42,6 @@
 #include "freertos/task.h"
 #include <string.h>
 #include <stdio.h>
-#include <math.h>
 #include "esp_heap_caps.h"
 
 /* LCD support for M5Stack Basic V2.7 */
@@ -51,100 +49,10 @@
 #include "esp_lcd_panel_vendor.h"
 #include "esp_lcd_panel_ops.h"
 
-/* 8x8 Pixel Font Definition */
-static const uint8_t font8x8[][8] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // Space
-    {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // !
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // " (empty for now)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // # (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // $ (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // % (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // & (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ' (empty)
-    {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}, // (
-    {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00}, // )
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // * (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // + (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, // ,
-    {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}, // -
-    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, // .
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // / (empty)
-    {0x3C,0x66,0x6E,0x76,0x66,0x66,0x3C,0x00}, // 0
-    {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00}, // 1
-    {0x3C,0x66,0x06,0x0C,0x30,0x60,0x7E,0x00}, // 2
-    {0x3C,0x66,0x06,0x1C,0x06,0x66,0x3C,0x00}, // 3
-    {0x0C,0x1C,0x3C,0x6C,0x7E,0x0C,0x0C,0x00}, // 4
-    {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00}, // 5
-    {0x3C,0x66,0x60,0x7C,0x66,0x66,0x3C,0x00}, // 6
-    {0x7E,0x66,0x0C,0x18,0x18,0x18,0x18,0x00}, // 7
-    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00}, // 8
-    {0x3C,0x66,0x66,0x3E,0x06,0x66,0x3C,0x00}, // 9
-    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}, // : - fine dots
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ; (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // < (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // = (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // > (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ? (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // @ (empty)
-    {0x18,0x24,0x42,0x7E,0x42,0x42,0x42,0x00}, // A - finer
-    {0x7C,0x42,0x42,0x7C,0x42,0x42,0x7C,0x00}, // B - finer
-    {0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00}, // C
-    {0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00}, // D
-    {0x7E,0x40,0x40,0x78,0x40,0x40,0x7E,0x00}, // E - finer
-    {0x7E,0x40,0x40,0x78,0x40,0x40,0x40,0x00}, // F - finer
-    {0x3C,0x66,0x60,0x6E,0x66,0x66,0x3C,0x00}, // G
-    {0x42,0x42,0x42,0x7E,0x42,0x42,0x42,0x00}, // H - finer
-    {0x7E,0x18,0x18,0x18,0x18,0x18,0x7E,0x00}, // I
-    {0x06,0x06,0x06,0x06,0x06,0x66,0x3C,0x00}, // J
-    {0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00}, // K
-    {0x40,0x40,0x40,0x40,0x40,0x40,0x7E,0x00}, // L - finer
-    {0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00}, // M
-    {0x42,0x62,0x72,0x5A,0x4E,0x46,0x42,0x00}, // N - finer
-    {0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00}, // O
-    {0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00}, // P
-    {0x3C,0x66,0x66,0x66,0x66,0x3C,0x0E,0x00}, // Q
-    {0x7C,0x42,0x42,0x7C,0x48,0x44,0x42,0x00}, // R - finer
-    {0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00}, // S
-    {0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, // T - finer
-    {0x42,0x42,0x42,0x42,0x42,0x42,0x3C,0x00}, // U - finer
-    {0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00}, // V
-    {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00}, // W
-    {0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00}, // X
-    {0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x00}, // Y
-    {0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00}, // Z
-    {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00}, // [
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // \ (empty)
-    {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00}, // ]
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ^ (empty)
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x7E,0x00}, // _
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // ` (empty)
-    {0x00,0x00,0x3C,0x06,0x3E,0x66,0x3E,0x00}, // a
-    {0x60,0x60,0x7C,0x66,0x66,0x66,0x7C,0x00}, // b
-    {0x00,0x00,0x3C,0x66,0x60,0x66,0x3C,0x00}, // c
-    {0x06,0x06,0x3E,0x66,0x66,0x66,0x3E,0x00}, // d
-    {0x00,0x00,0x3C,0x66,0x7E,0x60,0x3C,0x00}, // e
-    {0x1C,0x36,0x30,0x78,0x30,0x30,0x30,0x00}, // f
-    {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x3C}, // g
-    {0x60,0x60,0x7C,0x66,0x66,0x66,0x66,0x00}, // h
-    {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00}, // i
-    {0x06,0x00,0x0E,0x06,0x06,0x66,0x66,0x3C}, // j
-    {0x60,0x60,0x66,0x6C,0x78,0x6C,0x66,0x00}, // k
-    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, // l
-    {0x00,0x00,0x66,0x7F,0x7F,0x6B,0x63,0x00}, // m
-    {0x00,0x00,0x7C,0x66,0x66,0x66,0x66,0x00}, // n
-    {0x00,0x00,0x3C,0x66,0x66,0x66,0x3C,0x00}, // o
-    {0x00,0x00,0x7C,0x66,0x66,0x7C,0x60,0x60}, // p
-    {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x06}, // q
-    {0x00,0x00,0x7C,0x66,0x60,0x60,0x60,0x00}, // r
-    {0x00,0x00,0x3E,0x60,0x3C,0x06,0x7C,0x00}, // s
-    {0x10,0x30,0x7C,0x30,0x30,0x36,0x1C,0x00}, // t
-    {0x00,0x00,0x66,0x66,0x66,0x66,0x3E,0x00}, // u
-    {0x00,0x00,0x66,0x66,0x66,0x3C,0x18,0x00}, // v
-    {0x00,0x00,0x63,0x6B,0x7F,0x7F,0x36,0x00}, // w
-    {0x00,0x00,0x66,0x3C,0x18,0x3C,0x66,0x00}, // x
-    {0x00,0x00,0x66,0x66,0x66,0x3E,0x06,0x3C}, // y
-    {0x00,0x00,0x7E,0x0C,0x18,0x30,0x7E,0x00}, // z
-};
+/* LVGL port for ESP-IDF */
+#include "esp_lvgl_port.h"
+
+/* 8x8 font removed in Phase 6 -- LVGL Montserrat fonts used instead */
 
 /* Logging tag for ESP_LOG functions */
 static const char *TAG = "M5STACK_BASIC_V27_HAL";
@@ -153,8 +61,7 @@ static const char *TAG = "M5STACK_BASIC_V27_HAL";
 static esp_lcd_panel_handle_t panel_handle = NULL;  /* ST7789 panel handle */
 static esp_lcd_panel_io_handle_t io_handle = NULL;  /* SPI I/O handle */
 
-/* Forward declarations for internal helper functions */
-static void draw_char_scaled(int x, int y, char c, uint16_t color, uint16_t bg_color, int scale);
+/* Old draw helpers removed in Phase 6 -- rendering now handled by LVGL */
 
 /* I2C Bus Configuration - not currently used, sensors not implemented
  * If sensors are needed in the future, use the new i2c_master.h API
@@ -356,7 +263,7 @@ int m5stack_basic_v27_display_init(void) {
     
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = M5_LCD_RST_PIN,
-        .color_space = ESP_LCD_COLOR_SPACE_BGR,  // Use BGR color space (ILI9342C compatible with ST7789)
+        .color_space = ESP_LCD_COLOR_SPACE_BGR,
         .bits_per_pixel = 16,
         .flags = {
             .reset_active_high = 0,
@@ -410,16 +317,9 @@ int m5stack_basic_v27_display_init(void) {
     ESP_LOGI(TAG, "Clearing display to black...");
     m5stack_basic_v27_display_clear(M5_COLOR_BLACK);
     
-    // Show boot logo
-    ESP_LOGI(TAG, "Showing boot logo");
-    m5stack_basic_v27_display_show_boot_logo();
-    ESP_LOGI(TAG, "Boot logo drawn");
-    
-    // Enable backlight after boot logo is rendered
-    ESP_LOGI(TAG, "Enabling backlight after boot logo rendered");
-    gpio_set_level(M5_LCD_BL_PIN, 1);
-    ESP_LOGI(TAG, "Backlight enabled on GPIO %d", M5_LCD_BL_PIN);
-    
+    /* Backlight stays OFF — enabled by app_main after LVGL splash screen
+     * is rendered (see ADR-010) */
+
     return ESP_OK;
 }
 
@@ -598,308 +498,46 @@ void m5stack_basic_v27_display_clear(uint16_t color) {
     ESP_LOGI(TAG, "Display clear complete: %d chunks rendered", chunks_rendered);
 }
 
-/**
- * @brief Show boot logo
- * 
- * Displays the 320x240 RGB565 boot logo stored in boot_logo.c.
- * Uses chunked rendering (8 rows at a time) to fit in internal RAM.
- * The boot logo will be naturally overwritten when the Main Screen is rendered.
- */
-void m5stack_basic_v27_display_show_boot_logo(void) {
-    if (panel_handle == NULL) {
-        ESP_LOGE(TAG, "Boot logo: panel_handle is NULL");
-        return;
-    }
-    
-    ESP_LOGI(TAG, "Drawing boot logo (320x240 RGB565)");
-    
-    /* Use small chunked approach to fit in internal RAM (no PSRAM available)
-     * Process only 8 rows at a time to minimize memory usage
-     */
-    const int chunk_height = 8;  /* Process only 8 rows at a time */
-    const int total_pixels = M5_LCD_H_RES * chunk_height;
-    uint16_t *buffer = (uint16_t *)heap_caps_malloc(total_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
-    
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate boot logo buffer (%d bytes)", total_pixels * sizeof(uint16_t));
-        return;
-    }
-    
-    /* Render logo in small horizontal chunks for memory efficiency */
-    int chunks_rendered = 0;
-    for (int y = 0; y < M5_LCD_V_RES; y += chunk_height) {
-        int height = (y + chunk_height > M5_LCD_V_RES) ? (M5_LCD_V_RES - y) : chunk_height;
-        int pixels_in_chunk = M5_LCD_H_RES * height;
-        
-        /* Copy pixels from boot_logo_320x240 array to buffer
-         * Array is stored in row-major order: boot_logo_320x240[y * 320 + x]
-         */
-        int source_offset = y * M5_LCD_H_RES;
-        for (int i = 0; i < pixels_in_chunk; i++) {
-            buffer[i] = boot_logo_320x240[source_offset + i];
-        }
-        
-        /* Draw chunk to display at position (0, y) */
-        esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle, 0, y, M5_LCD_H_RES, y + height, buffer);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to draw boot logo chunk at y=%d: %s", y, esp_err_to_name(ret));
-        } else {
-            chunks_rendered++;
-        }
-    }
-    
-    heap_caps_free(buffer);
-    ESP_LOGI(TAG, "Boot logo drawn: %d chunks rendered", chunks_rendered);
+void m5stack_basic_v27_backlight_on(void) {
+    gpio_set_level(M5_LCD_BL_PIN, 1);
+    ESP_LOGI(TAG, "Backlight enabled on GPIO %d", M5_LCD_BL_PIN);
 }
 
-/**
- * @brief Draw single character at normal scale
- * 
- * Convenience wrapper for draw_char_scaled with scale factor of 1.
- * Renders an 8x8 pixel character from the built-in font.
- * 
- * @param x Horizontal position
- * @param y Vertical position
- * @param c Character to draw
- * @param color Foreground color (RGB565)
- * @param bg_color Background color (RGB565, unused for transparency)
- */
-// Removed unused draw_char function - using draw_char_scaled directly
+lv_display_t *m5stack_basic_v27_lvgl_init(void) {
+    const lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+    esp_err_t ret = lvgl_port_init(&lvgl_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize LVGL port: %s", esp_err_to_name(ret));
+        return NULL;
+    }
 
-/**
- * @brief Draw character with scaling support
- * 
- * Renders a character from the 8x8 font with specified scaling factor.
- * Uses pixel-by-pixel rendering for transparency - only foreground pixels
- * are drawn, allowing background to show through.
- * 
- * @param x Horizontal position
- * @param y Vertical position  
- * @param c Character to draw (ASCII 32-122)
- * @param color Foreground color (RGB565)
- * @param bg_color Background color (unused - transparent rendering)
- * @param scale Scaling factor (1=8x8, 2=16x16, etc.)
- */
-static void draw_char_scaled(int x, int y, char c, uint16_t color, uint16_t bg_color, int scale) {
-    if (panel_handle == NULL) return;
-    
-    /* Bounds checking with scaling factor */
-    int scaled_width = 8 * scale;
-    int scaled_height = 8 * scale;
-    if (x < 0 || y < 0 || x + scaled_width > M5_LCD_H_RES || y + scaled_height > M5_LCD_V_RES) {
-        return;
+    const lvgl_port_display_cfg_t disp_cfg = {
+        .io_handle = io_handle,
+        .panel_handle = panel_handle,
+        .buffer_size = M5_LCD_H_RES * 40,
+        .double_buffer = true,
+        .hres = M5_LCD_H_RES,
+        .vres = M5_LCD_V_RES,
+        .monochrome = false,
+        .color_format = LV_COLOR_FORMAT_RGB565,
+        .rotation = {
+            .swap_xy = false,
+            .mirror_x = false,
+            .mirror_y = false,
+        },
+        .flags = {
+            .buff_dma = true,
+            .swap_bytes = true,
+        },
+    };
+
+    lv_display_t *disp = lvgl_port_add_disp(&disp_cfg);
+    if (disp == NULL) {
+        ESP_LOGE(TAG, "Failed to add LVGL display");
+        return NULL;
     }
-    
-    /* Convert ASCII character to font table index */
-    int idx = 0;
-    if (c >= ' ' && c <= 'z') {
-        idx = c - ' ';
-    }
-    
-    /* Render character pixel-by-pixel with scaling and transparency */
-    const int char_width = 8;
-    const int char_height = 8;
-    
-    for (int row = 0; row < char_height; row++) {
-        uint8_t line = font8x8[idx][row];
-        for (int col = 0; col < char_width; col++) {
-            /* Only draw foreground pixels - background remains transparent */
-            if (line & (0x80 >> col)) {
-                /* Draw scaled pixel block (scale x scale pixels) */
-                for (int sy = 0; sy < scale; sy++) {
-                    for (int sx = 0; sx < scale; sx++) {
-                        int px = x + col * scale + sx;
-                        int py = y + row * scale + sy;
-                        if (px < M5_LCD_H_RES && py < M5_LCD_V_RES) {
-                            uint16_t pixel_color = color;
-                            esp_lcd_panel_draw_bitmap(panel_handle, px, py, px + 1, py + 1, &pixel_color);
-                        }
-                    }
-                }
-            }
-        }
-    }
+
+    ESP_LOGI(TAG, "LVGL display initialized (%dx%d, double-buffered DMA)",
+             M5_LCD_H_RES, M5_LCD_V_RES);
+    return disp;
 }
-
-/**
- * @brief Print text string at normal scale
- * 
- * Convenience wrapper for scaled text printing with scale factor of 1.
- * Renders text using the built-in 8x8 font.
- * 
- * @param x Starting horizontal position
- * @param y Starting vertical position
- * @param text Null-terminated string to print
- * @param color Text color (RGB565)
- */
-void m5stack_basic_v27_display_print(int x, int y, const char *text, uint16_t color) {
-    m5stack_basic_v27_display_print_scaled(x, y, text, color, 1);
-}
-
-/**
- * @brief Print text string with scaling support
- * 
- * Renders text with specified scaling factor, supporting:
- * - Newline characters for explicit line breaks
- * - Automatic word wrapping at screen edge
- * - Transparent rendering (background shows through)
- * 
- * @param x Starting horizontal position
- * @param y Starting vertical position
- * @param text Null-terminated string to print (supports \n)
- * @param color Text color (RGB565)
- * @param scale Scaling factor (1=8x8, 2=16x16, etc.)
- */
-void m5stack_basic_v27_display_print_scaled(int x, int y, const char *text, uint16_t color, int scale) {
-    if (panel_handle == NULL || text == NULL) return;
-    
-    int cursor_x = x;
-    const char *p = text;
-    int char_width = 8 * scale;
-    int char_height = 8 * scale;
-    int line_spacing = char_height + 2;  /* Small spacing between lines */
-    
-    while (*p) {
-        /* Handle explicit newline characters */
-        if (*p == '\n') {
-            cursor_x = x;
-            y += line_spacing;  /* Move to next line */
-        } else {
-            /* Render character with transparency */
-            draw_char_scaled(cursor_x, y, *p, color, M5_COLOR_BLACK, scale);
-            cursor_x += char_width;  /* Advance cursor by scaled character width */
-            
-            /* Automatic word wrapping at screen edge */
-            if (cursor_x > M5_LCD_H_RES - char_width) {
-                cursor_x = x;
-                y += line_spacing;
-            }
-        }
-        p++;
-    }
-}
-
-/**
- * @brief Draw monochrome bitmap with transparency
- * 
- * Renders a 1-bit bitmap (1=foreground, 0=transparent) at the specified position.
- * Only foreground pixels are drawn, allowing background to show through.
- * Automatically clips to screen boundaries.
- * 
- * @param x Horizontal position
- * @param y Vertical position
- * @param width Bitmap width in pixels
- * @param height Bitmap height in pixels
- * @param bitmap Pointer to bitmap data (1 bit per pixel, row-major order)
- * @param color Foreground color (RGB565)
- * @param bg_color Background color (unused - transparent rendering)
- */
-void m5stack_basic_v27_display_draw_bitmap(int x, int y, int width, int height, const uint8_t *bitmap, uint16_t color, uint16_t bg_color) {
-    if (panel_handle == NULL || bitmap == NULL) return;
-    if (x >= M5_LCD_H_RES || y >= M5_LCD_V_RES) return;
-    
-    /* Clip bitmap to screen boundaries */
-    int draw_width = (x + width > M5_LCD_H_RES) ? M5_LCD_H_RES - x : width;
-    int draw_height = (y + height > M5_LCD_V_RES) ? M5_LCD_V_RES - y : height;
-    if (draw_width <= 0 || draw_height <= 0) return;
-    
-    /* Render bitmap pixel-by-pixel for transparency support */
-    int byte_width = (width + 7) / 8;  /* Bytes per row (padded to byte boundary) */
-    for (int row = 0; row < draw_height; row++) {
-        for (int col = 0; col < draw_width; col++) {
-            int bitmap_byte_idx = row * byte_width + col / 8;
-            int bit_idx = 7 - (col % 8);  /* MSB first bit ordering */
-            bool pixel_set = (bitmap[bitmap_byte_idx] >> bit_idx) & 1;
-            
-            /* Draw foreground pixels with color, background pixels with bg_color */
-            uint16_t pixel_color = pixel_set ? color : bg_color;
-            esp_lcd_panel_draw_bitmap(panel_handle, x + col, y + row, x + col + 1, y + row + 1, &pixel_color);
-        }
-    }
-}
-
-/**
- * @brief Draw filled circle (simplified as square)
- * 
- * Currently implemented as a filled square for simplicity and performance.
- * Most UI elements in the camera remote use rectangular shapes anyway.
- * 
- * @param x Center horizontal position
- * @param y Center vertical position
- * @param radius Circle radius in pixels
- * @param color Fill color (RGB565)
- */
-void m5stack_basic_v27_display_fill_circle(int x, int y, int radius, uint16_t color) {
-    if (panel_handle == NULL || radius <= 0) return;
-    
-    /* Simple implementation: draw filled square instead of circle
-     * This avoids complex circle drawing algorithms and potential artifacts
-     * Most UI elements in this application use rectangular shapes
-     */
-    int size = radius * 2;
-    m5stack_basic_v27_display_fill_rect(x - radius, y - radius, size, size, color);
-}
-
-/**
- * @brief Draw filled rectangle
- * 
- * Renders a solid-colored rectangle using small chunked buffers to fit in internal RAM.
- * Automatically clips to screen boundaries.
- * 
- * @param x Horizontal position
- * @param y Vertical position
- * @param width Rectangle width in pixels
- * @param height Rectangle height in pixels
- * @param color Fill color (RGB565)
- */
-void m5stack_basic_v27_display_fill_rect(int x, int y, int width, int height, uint16_t color) {
-    if (panel_handle == NULL) return;
-    if (x >= M5_LCD_H_RES || y >= M5_LCD_V_RES) return;
-    
-    /* Clip rectangle to screen boundaries */
-    int draw_width = (x + width > M5_LCD_H_RES) ? M5_LCD_H_RES - x : width;
-    int draw_height = (y + height > M5_LCD_V_RES) ? M5_LCD_V_RES - y : height;
-    if (draw_width <= 0 || draw_height <= 0) return;
-    
-    /* Use small chunked rendering to fit in internal RAM (no PSRAM)
-     * Process only 8 lines at a time to minimize memory usage
-     */
-    const int chunk_height = 8;
-    int total_pixels = draw_width * chunk_height;
-    uint16_t *buffer = (uint16_t *)heap_caps_malloc(total_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
-    
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate rectangle buffer");
-        return;
-    }
-    
-    /* Fill buffer with solid color (RGB565 format) */
-    for (int i = 0; i < total_pixels; i++) {
-        buffer[i] = color;
-    }
-    
-    /* Render rectangle in small chunks */
-    for (int chunk_y = 0; chunk_y < draw_height; chunk_y += chunk_height) {
-        int current_height = (chunk_y + chunk_height > draw_height) ? (draw_height - chunk_y) : chunk_height;
-        
-        /* If chunk is smaller than buffer, adjust buffer usage */
-        if (current_height < chunk_height) {
-            /* Re-fill only the needed portion */
-            for (int i = 0; i < draw_width * current_height; i++) {
-                buffer[i] = color;
-            }
-        }
-        
-        /* Transfer chunk to display */
-        esp_err_t ret = esp_lcd_panel_draw_bitmap(panel_handle, 
-                                                   x, y + chunk_y, 
-                                                   x + draw_width, y + chunk_y + current_height, 
-                                                   buffer);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to draw rectangle chunk: %s", esp_err_to_name(ret));
-        }
-    }
-    
-    heap_caps_free(buffer);
-}
-

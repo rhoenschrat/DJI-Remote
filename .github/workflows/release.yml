@@ -1,0 +1,40 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          cp sdkconfig.defaults.m5stack_basic_v27 sdkconfig.defaults
+          . $IDF_PATH/export.sh
+          idf.py build
+
+      - name: Package release
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          chmod +x tools/release/build_release.sh
+          tools/release/build_release.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/DJI-Remote-*.zip
+            release/dji-remote-merged.bin
+          body_path: release/RELEASE_NOTES.md
+          generate_release_notes: true

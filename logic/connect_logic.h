@@ -29,7 +29,7 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode);
  */
 int connect_logic_ble_connect_direct(int camera_index);
 
-int connect_logic_ble_disconnect(void);
+int connect_logic_ble_disconnect(int camera_index);
 
 int connect_logic_protocol_connect(int camera_index, uint32_t device_id, uint8_t mac_addr_len, const int8_t *mac_addr,
                                     uint32_t fw_version, uint8_t verify_mode, uint16_t verify_data,

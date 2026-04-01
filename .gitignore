@@ -4,3 +4,6 @@
 /build
 /managed_components
 .DS_Store
+sdkconfig.old
+/release
+/.cache

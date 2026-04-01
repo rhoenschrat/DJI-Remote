@@ -72,11 +72,55 @@ https://github.com/espressif/esp-idf
 https://www.apache.org/licenses/LICENSE-2.0
 
 
-# 4. Summary
+# 4. LVGL v9.5.0
+
+This project uses **LVGL** for all UI rendering.
+
+LVGL is licensed under the **MIT License**.
+
+**Source:**
+https://github.com/lvgl/lvgl
+
+**MIT License:**
+https://opensource.org/licenses/MIT
+
+
+# 5. esp_lvgl_port v2.7.2
+
+This project uses **esp_lvgl_port** for integrating LVGL with ESP-IDF display
+and input drivers.
+
+esp_lvgl_port is licensed under the **Apache License 2.0**.
+
+**Source:**
+https://components.espressif.com/components/espressif/esp_lvgl_port
+
+**Apache 2.0 License:**
+https://www.apache.org/licenses/LICENSE-2.0
+
+
+# 6. Apache NimBLE
+
+This project uses **Apache NimBLE** (included via ESP-IDF) as the BLE GATT
+client stack.
+
+NimBLE is licensed under the **Apache License 2.0**.
+
+**Source:**
+https://github.com/apache/mynewt-nimble
+
+**Apache 2.0 License:**
+https://www.apache.org/licenses/LICENSE-2.0
+
+
+# 7. Summary
 
 - The **DJI-Remote project code** is licensed under **MIT**.  
 - DJI SDK **protocol files** are under **DJI EULA** and not MIT-licensed.  
 - Code borrowed from **DJI's GPS Controller Demo** may be under **MIT** or **DJI EULA** depending on the component.  
 - **ESP-IDF** components are under **Apache 2.0**.
+- **LVGL v9.5.0** is under **MIT**.
+- **esp_lvgl_port v2.7.2** is under **Apache 2.0**.
+- **Apache NimBLE** is under **Apache 2.0**.
 
 This notice ensures license clarity and proper attribution for all included third-party resources.

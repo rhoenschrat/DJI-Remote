@@ -884,7 +884,7 @@ static void process_notification_data(int camera_index, const uint8_t *raw_data,
             // Assume protocol_parse_data returns void* type
             parse_result = protocol_parse_data(frame.data, frame.data_length, frame.cmd_type, &parse_result_length);
             if (parse_result == NULL) {
-                ESP_LOGE(TAG, "Failed to parse data segment, parse_result is null");
+                ESP_LOGD(TAG, "No parsed result for frame (send-only or unknown command)");
                 return;
             }
         } else {

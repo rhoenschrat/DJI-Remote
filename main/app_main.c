@@ -27,6 +27,10 @@
 #include "light_logic.h"
 #include "m5stack_basic_v27_hal.h"
 #include "ui.h"
+#include "ui_layout.h"
+#include "ui_screen_splash.h"
+#include "lvgl_icons.h"
+#include "esp_lvgl_port.h"
 #include "../gps/gps_reader.h"
 #include "command_logic.h"
 #include "freertos/task.h"
@@ -123,12 +127,51 @@ void app_main(void) {
         ESP_LOGI(TAG, "GPS transmission task created (10Hz)");
     }
 
-    /* Initialize user interface system
-     * Sets up: display rendering, screen management, button handlers,
-     * GPIO triggers, camera state management, NVS storage
+    /* Initialize LVGL display framework
+     * Uses the existing SPI panel handle from display_init; creates
+     * its own FreeRTOS task for rendering.
      */
+    lv_display_t *lvgl_disp = m5stack_basic_v27_lvgl_init();
+    if (lvgl_disp == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize LVGL display");
+        return;
+    }
+    ESP_LOGI(TAG, "LVGL display initialized");
+
+    /* Show LVGL splash screen before enabling backlight (ADR-010).
+     * Hold the LVGL lock so the render task cannot draw the default
+     * white screen before our splash is loaded.
+     */
+    lvgl_port_lock(0);
+    lv_obj_t *splash = ui_screen_splash_create();
+    lv_screen_load(splash);
+    lvgl_port_unlock();
+
+    /* Let LVGL render one frame, then turn on the backlight so the
+     * first visible frame is the splash logo on a black background. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    m5stack_basic_v27_backlight_on();
+
+    ui_layout_init(lvgl_disp);
+    lvgl_icons_init();
+
+    /* Load NVS, pairing data, and start the BLE boot scan while the
+     * splash screen is still visible.  The scan runs asynchronously on
+     * the BLE stack tasks. */
+    ui_early_init();
+
+    /* Keep splash screen visible for ~2 seconds total (includes the
+     * 100 ms pre-backlight wait above). */
+    vTaskDelay(pdMS_TO_TICKS(1900));
+
+    /* Initialize the main UI (creates and loads the main screen) */
     ui_init();
     ESP_LOGI(TAG, "UI system initialized");
+
+    /* Destroy the splash screen now that the main UI is active */
+    lvgl_port_lock(0);
+    ui_screen_splash_destroy();
+    lvgl_port_unlock();
 
     /* System ready - log operational information for user */
     ESP_LOGI(TAG, "System ready - Icon-based UI active!");
