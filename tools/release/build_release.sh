@@ -1,22 +1,43 @@
 #!/usr/bin/env bash
 # Build a release package from compiled ESP-IDF firmware.
 #
-# Usage: build_release.sh [VERSION]
+# Usage: build_release.sh <VERSION> <BOARD>
+#   BOARD: m5stack_basic_v27 | waveshare_s3_lcd19
 #
 # Run after a successful "idf.py build". Produces:
-#   release/dji-remote-merged.bin          — single binary for espflash.app
-#   release/DJI-Remote-v{VERSION}-esp32.zip — full package (bins + manifest + flash scripts)
-#   release/RELEASE_NOTES.md               — copied from RELEASE_NOTES.md at repo root
+#   release/dji-remote-v{VERSION}-{board-slug}.bin  — merged binary per board
+#   release/RELEASE_NOTES.md                        — copied from repo root
 #
-# VERSION defaults to "dev" if not provided.
+# The script does NOT wipe the release/ directory, so it can be called once per
+# board target and both binaries accumulate in the same output folder.
 
 set -euo pipefail
 
-VERSION="${1:-dev}"
+VERSION="${1:?Usage: build_release.sh <VERSION> <BOARD>}"
+BOARD="${2:?Usage: build_release.sh <VERSION> <BOARD>}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 RELEASE_DIR="$PROJECT_ROOT/release"
-PACKAGE_DIR="$RELEASE_DIR/package"
+
+# ---------------------------------------------------------------------------
+# Derive chip type and bootloader offset from BOARD
+# ---------------------------------------------------------------------------
+case "$BOARD" in
+  m5stack_basic_v27)
+    CHIP="esp32"
+    BOOTLOADER_OFFSET="0x1000"
+    BOARD_SLUG="m5stack-basic-v27"
+    ;;
+  waveshare_s3_lcd19)
+    CHIP="esp32s3"
+    BOOTLOADER_OFFSET="0x0"
+    BOARD_SLUG="waveshare-s3-lcd19"
+    ;;
+  *)
+    echo "ERROR: Unknown BOARD '$BOARD'. Use m5stack_basic_v27 or waveshare_s3_lcd19." >&2
+    exit 1
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Verify build artifacts
@@ -33,71 +54,26 @@ for f in "$BOOTLOADER" "$PARTITION_TABLE" "$APP"; do
 done
 
 # ---------------------------------------------------------------------------
-# Prepare output directory
+# Prepare output directory (no rm — both targets accumulate)
 # ---------------------------------------------------------------------------
-rm -rf "$RELEASE_DIR"
-mkdir -p "$PACKAGE_DIR"
+mkdir -p "$RELEASE_DIR"
 
 # ---------------------------------------------------------------------------
 # 1. Create merged binary (for espflash.app and similar tools)
 # ---------------------------------------------------------------------------
-echo "Creating merged binary..."
-python -m esptool --chip esp32 merge_bin \
-    -o "$RELEASE_DIR/dji-remote-merged.bin" \
+MERGED_BIN="$RELEASE_DIR/dji-remote-v${VERSION}-${BOARD_SLUG}.bin"
+echo "Creating merged binary for $BOARD ($CHIP)..."
+python -m esptool --chip "$CHIP" merge_bin \
+    -o "$MERGED_BIN" \
     --flash_mode dio \
     --flash_size 16MB \
     --flash_freq 80m \
-    0x1000  "$BOOTLOADER" \
+    "$BOOTLOADER_OFFSET" "$BOOTLOADER" \
     0x8000  "$PARTITION_TABLE" \
     0x10000 "$APP"
 
 # ---------------------------------------------------------------------------
-# 2. Copy binaries into package
-# ---------------------------------------------------------------------------
-cp "$BOOTLOADER"      "$PACKAGE_DIR/bootloader.bin"
-cp "$PARTITION_TABLE"  "$PACKAGE_DIR/partition-table.bin"
-cp "$APP"              "$PACKAGE_DIR/dji_camera_bluetooth_control.bin"
-cp "$RELEASE_DIR/dji-remote-merged.bin" "$PACKAGE_DIR/"
-
-# ---------------------------------------------------------------------------
-# 3. Generate ESP Web Tools manifest
-# ---------------------------------------------------------------------------
-cat > "$PACKAGE_DIR/manifest.json" <<EOF
-{
-  "name": "DJI-Remote",
-  "version": "$VERSION",
-  "builds": [
-    {
-      "chipFamily": "ESP32",
-      "parts": [
-        { "path": "bootloader.bin", "offset": 4096 },
-        { "path": "partition-table.bin", "offset": 32768 },
-        { "path": "dji_camera_bluetooth_control.bin", "offset": 65536 }
-      ]
-    }
-  ]
-}
-EOF
-
-# ---------------------------------------------------------------------------
-# 4. Copy flash scripts
-# ---------------------------------------------------------------------------
-FLASH_DIR="$PROJECT_ROOT/tools/flash"
-if [ -d "$FLASH_DIR" ]; then
-    cp "$FLASH_DIR/flash-mac.sh"  "$PACKAGE_DIR/" 2>/dev/null || true
-    cp "$FLASH_DIR/flash-win.bat" "$PACKAGE_DIR/" 2>/dev/null || true
-    cp "$FLASH_DIR/README.txt"    "$PACKAGE_DIR/" 2>/dev/null || true
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Create ZIP archive
-# ---------------------------------------------------------------------------
-echo "Creating ZIP archive..."
-cd "$RELEASE_DIR"
-zip -r "DJI-Remote-v${VERSION}-esp32.zip" package/
-
-# ---------------------------------------------------------------------------
-# 6. Copy release notes from repo root
+# 2. Copy release notes from repo root
 # ---------------------------------------------------------------------------
 if [ ! -f "$PROJECT_ROOT/RELEASE_NOTES.md" ]; then
     echo "WARNING: $PROJECT_ROOT/RELEASE_NOTES.md not found — skipping." >&2
@@ -107,4 +83,4 @@ fi
 
 echo ""
 echo "Release artifacts created in $RELEASE_DIR/"
-ls -lh "$RELEASE_DIR/dji-remote-merged.bin" "$RELEASE_DIR/DJI-Remote-v${VERSION}-esp32.zip"
+ls -lh "$MERGED_BIN"

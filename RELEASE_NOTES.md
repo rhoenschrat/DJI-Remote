@@ -1,35 +1,33 @@
 # Release Notes
 
-## DJI-Remote v1.1.0
+## DJI-Remote v1.2.0
 
-Firmware for M5Stack Basic V2.7 (ESP32).
+This release adds the Waveshare ESP32-S3-LCD-1.9 as a second supported hardware
+target and switches to a web-flash-only release model.
 
-This release migrates the UI rendering engine to LVGL and the Bluetooth stack to
-Apache NimBLE, improving reliability and enabling a cleaner architecture for future
-development.
+### What's New in v1.2.0
 
-### What's New in v1.1.0
-
-- **LVGL 9.5.0 UI rendering** — All screens replaced with LVGL widget-based rendering via esp_lvgl_port 2.7.2. Replaces manual TFT/SPI drawing.
-- **NimBLE BLE stack** — Apache NimBLE replaces Bluedroid as the GATT client stack.
-- **Boot splash screen** — LVGL-rendered splash screen replaces the raw bitmap boot logo.
-- **Release packaging automation** — GitHub Actions workflow and `build_release.sh` produce merged binary and ZIP for every tagged release.
-- **NimBLE scan fixes** — Device names now shown during scan; duplicate filter disabled; reconnect-on-unpair prevented.
-- **Production log level** — Default log level set to ERROR for production builds.
+- **Waveshare ESP32-S3-LCD-1.9 support** — New HAL, ESP32-S3 target,
+  320x170 landscape IPS display (ST7789V2).
+- **Dual-target release builds** — Two merged binaries produced per release,
+  one per hardware target.
+- **Web-flash only** — Manual flash ZIP and scripts removed from release
+  artifacts and documentation.
+- **UI layout for 320x170** — Adaptive layout system supporting both
+  320x240 (M5Stack) and 320x170 (Waveshare) screen resolutions.
+- **GPS Kconfig** — GPS UART pins and baud rate configurable per board
+  via Kconfig (no hardcoded pin assignments).
 
 ### Flash Instructions
 
-**Option 1 — Web Flash (easiest)**
+Flash via [espflash.app](https://espflash.app) (Chrome or Edge required).
+Download the binary for your hardware target from the
+[latest release](https://github.com/rhoenschrat/DJI-Remote/releases/latest):
 
-Use [espflash.app](https://espflash.app) or [ESP Web Tools](https://web.esptool.io/)
-with the merged binary `dji-remote-merged.bin`. Requires Chrome or Edge.
+- `dji-remote-v1.2.0-m5stack-basic-v27.bin` — M5Stack Basic V2.7
+- `dji-remote-v1.2.0-waveshare-s3-lcd19.bin` — Waveshare ESP32-S3-LCD-1.9
 
-**Option 2 — Manual Flash**
-
-Download `DJI-Remote-v1.1.0-esp32.zip`, extract it, and follow the instructions
-in `README.txt`. Requires [esptool](https://github.com/espressif/esptool/releases).
-
-### Flash Settings
+### Flash Settings — M5Stack Basic V2.7
 
 | Setting         | Value  |
 |-----------------|--------|
@@ -38,19 +36,11 @@ in `README.txt`. Requires [esptool](https://github.com/espressif/esptool/release
 | Flash size      | 16 MB  |
 | Flash frequency | 80 MHz |
 
----
+### Flash Settings — Waveshare ESP32-S3-LCD-1.9
 
-## DJI-Remote v1.0.0
-
-Initial public release. Firmware for M5Stack Basic V2.7 (ESP32).
-
-### Features
-
-- Control up to three DJI Osmo Action cameras simultaneously over BLE
-- Live GPS forwarding to all connected cameras (10 Hz)
-- Start/stop recording, highlight tags, sleep/wake, snapshot-while-sleeping
-- Mode switching via QS button emulation
-- Automatic boot-time scanning and reconnection
-- Multi-camera action coordination with sequential wake queue
-- Optional external hardware buttons (GPIO26, GPIO21, GPIO22)
-- Supported cameras: Action 4, Action 5 Pro, Action 6, Osmo 360
+| Setting         | Value    |
+|-----------------|----------|
+| Chip            | ESP32-S3 |
+| Flash mode      | DIO      |
+| Flash size      | 16 MB    |
+| Flash frequency | 80 MHz   |
