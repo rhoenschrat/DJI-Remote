@@ -34,9 +34,9 @@ jobs:
       - name: Build firmware — Waveshare ESP32-S3-LCD-1.9 (ESP32-S3)
         shell: bash
         run: |
+          . $IDF_PATH/export.sh
           idf.py fullclean
           cp sdkconfig.defaults.waveshare_s3_lcd19 sdkconfig.defaults
-          . $IDF_PATH/export.sh
           idf.py set-target esp32s3
           idf.py build
 
