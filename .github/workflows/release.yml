@@ -16,25 +16,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build firmware
+      - name: Build firmware — M5Stack Basic v2.7 (ESP32)
         shell: bash
         run: |
           cp sdkconfig.defaults.m5stack_basic_v27 sdkconfig.defaults
           . $IDF_PATH/export.sh
+          idf.py set-target esp32
           idf.py build
 
-      - name: Package release
+      - name: Package release — M5Stack Basic v2.7
         shell: bash
         run: |
           . $IDF_PATH/export.sh
           chmod +x tools/release/build_release.sh
-          tools/release/build_release.sh "${GITHUB_REF_NAME#v}"
+          tools/release/build_release.sh "${GITHUB_REF_NAME#v}" m5stack_basic_v27
+
+      - name: Build firmware — Waveshare ESP32-S3-LCD-1.9 (ESP32-S3)
+        shell: bash
+        run: |
+          idf.py fullclean
+          cp sdkconfig.defaults.waveshare_s3_lcd19 sdkconfig.defaults
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Package release — Waveshare ESP32-S3-LCD-1.9
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          tools/release/build_release.sh "${GITHUB_REF_NAME#v}" waveshare_s3_lcd19
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/DJI-Remote-*.zip
-            release/dji-remote-merged.bin
+            release/dji-remote-*-m5stack-basic-v27.bin
+            release/dji-remote-*-waveshare-s3-lcd19.bin
           body_path: release/RELEASE_NOTES.md
           generate_release_notes: true

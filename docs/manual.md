@@ -2,6 +2,11 @@
 
 This manual explains how to operate the DJI-Remote device, covering startup behavior, pairing, single-camera control, multi-camera coordination, and GPS functionality.
 
+> This manual applies to both supported hardware targets: **M5Stack Basic V2.7**
+> (ESP32, built-in buttons) and **Waveshare ESP32-S3-LCD-1.9** (ESP32-S3,
+> external buttons wired to GPIO5/6/16). All operations are identical on both
+> boards.
+
 
 # 1. Starting the Remote
 

@@ -25,7 +25,29 @@
 
 #include "connect_logic.h"
 #include "light_logic.h"
-#include "m5stack_basic_v27_hal.h"
+#include "sdkconfig.h"
+
+/* Board HAL selection — driven by Kconfig (main/Kconfig.projbuild) */
+#if defined(CONFIG_BOARD_M5STACK_BASIC_V27)
+  #include "m5stack_basic_v27_hal.h"
+  #define HAL_INIT()                m5stack_basic_v27_init()
+  #define HAL_LVGL_INIT()           m5stack_basic_v27_lvgl_init()
+  #define HAL_BACKLIGHT_ON()        m5stack_basic_v27_backlight_on()
+  #define HAL_BTN_A_PRESSED()       m5stack_basic_v27_button_a_pressed()
+  #define HAL_BTN_B_PRESSED()       m5stack_basic_v27_button_b_pressed()
+  #define HAL_BTN_C_PRESSED()       m5stack_basic_v27_button_c_pressed()
+#elif defined(CONFIG_BOARD_WAVESHARE_S3_LCD19)
+  #include "waveshare_s3_lcd19_hal.h"
+  #define HAL_INIT()                waveshare_s3_lcd19_init()
+  #define HAL_LVGL_INIT()           waveshare_s3_lcd19_lvgl_init()
+  #define HAL_BACKLIGHT_ON()        waveshare_s3_lcd19_backlight_on()
+  #define HAL_BTN_A_PRESSED()       waveshare_s3_lcd19_button_a_pressed()
+  #define HAL_BTN_B_PRESSED()       waveshare_s3_lcd19_button_b_pressed()
+  #define HAL_BTN_C_PRESSED()       waveshare_s3_lcd19_button_c_pressed()
+#else
+  #error "No board target defined. Set CONFIG_BOARD_M5STACK_BASIC_V27 or CONFIG_BOARD_WAVESHARE_S3_LCD19."
+#endif
+
 #include "ui.h"
 #include "ui_layout.h"
 #include "ui_screen_splash.h"
@@ -39,6 +61,7 @@
 
 /* Forward declaration for GPS transmission task */
 static void gps_transmission_task(void *pvParameters);
+
 
 /**
  * @brief Main application entry point
@@ -79,12 +102,12 @@ void app_main(void) {
      * This includes: display controller, button GPIO, power management,
      * I2C bus, SPI bus, and other core hardware peripherals
      */
-    res = m5stack_basic_v27_init();
+    res = HAL_INIT();
     if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize M5Stack Basic V2.7 hardware");
+        ESP_LOGE(TAG, "Failed to initialize hardware platform");
         return;
     }
-    ESP_LOGI(TAG, "M5Stack Basic V2.7 hardware initialized");
+    ESP_LOGI(TAG, "Hardware platform initialized");
 
     /* Initialize RGB LED light system
      * Sets up the WS2812 LED strip driver for status indication
@@ -131,7 +154,7 @@ void app_main(void) {
      * Uses the existing SPI panel handle from display_init; creates
      * its own FreeRTOS task for rendering.
      */
-    lv_display_t *lvgl_disp = m5stack_basic_v27_lvgl_init();
+    lv_display_t *lvgl_disp = HAL_LVGL_INIT();
     if (lvgl_disp == NULL) {
         ESP_LOGE(TAG, "Failed to initialize LVGL display");
         return;
@@ -150,7 +173,7 @@ void app_main(void) {
     /* Let LVGL render one frame, then turn on the backlight so the
      * first visible frame is the splash logo on a black background. */
     vTaskDelay(pdMS_TO_TICKS(100));
-    m5stack_basic_v27_backlight_on();
+    HAL_BACKLIGHT_ON();
 
     ui_layout_init(lvgl_disp);
     lvgl_icons_init();
@@ -192,7 +215,7 @@ void app_main(void) {
          * POWER MANAGEMENT
          * Monitor power button for 3-second hold to initiate shutdown
          */
-        bool power_button_pressed = m5stack_basic_v27_button_c_pressed();
+        bool power_button_pressed = HAL_BTN_C_PRESSED();
         
         if (power_button_pressed && !power_button_was_pressed) {
             /* Power button press detected - start hold timer */
@@ -208,7 +231,7 @@ void app_main(void) {
                 ESP_LOGI(TAG, "Power button held for 3s - shutting down");
                 
                 /* Display shutdown message to user */
-                ui_show_message("Shutting down...", M5_COLOR_RED, 1000);
+                ui_show_message("Shutting down...", 0, 1000);
                 
                 /* M5Stack Basic V2.7 does not have a power hold circuit
                  * Power management is handled differently - may need to enter deep sleep
@@ -237,12 +260,12 @@ void app_main(void) {
          * Pairing Screen: Select item
          * Settings Screen: Execute action
          */
-        if (m5stack_basic_v27_button_a_pressed()) {
+        if (HAL_BTN_A_PRESSED()) {
             ESP_LOGI(TAG, "Button A pressed");
             ui_handle_button_a();
             
             /* Wait for button release to prevent multiple triggers */
-            while (m5stack_basic_v27_button_a_pressed()) {
+            while (HAL_BTN_A_PRESSED()) {
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -253,12 +276,12 @@ void app_main(void) {
          * Pairing Screen: Cycle item selection
          * Settings Screen: Cycle item selection
          */
-        if (m5stack_basic_v27_button_b_pressed()) {
+        if (HAL_BTN_B_PRESSED()) {
             ESP_LOGI(TAG, "Button B pressed");
             ui_handle_button_b();
             
             /* Wait for button release to prevent multiple triggers */
-            while (m5stack_basic_v27_button_b_pressed()) {
+            while (HAL_BTN_B_PRESSED()) {
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -269,12 +292,12 @@ void app_main(void) {
          * Opens Pairing Screen if camera slot is unpaired
          * Opens Settings Screen if camera slot is paired
          */
-        if (m5stack_basic_v27_button_c_pressed()) {
+        if (HAL_BTN_C_PRESSED()) {
             ESP_LOGI(TAG, "Button C pressed");
             ui_handle_button_c();
             
             /* Wait for button release to prevent multiple triggers */
-            while (m5stack_basic_v27_button_c_pressed()) {
+            while (HAL_BTN_C_PRESSED()) {
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
             vTaskDelay(pdMS_TO_TICKS(200));

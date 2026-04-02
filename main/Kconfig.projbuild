@@ -1,19 +1,49 @@
-menu "Example Configuration"
+menu "Board Selection"
 
-    config EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
-        bool "Dump whole adv data and scan response data in example"
-        default n
+    choice BOARD_TARGET
+        prompt "Target board"
+        default BOARD_M5STACK_BASIC_V27
 
-    config EXAMPLE_CI_ID
-        int
-        default 70
+        config BOARD_M5STACK_BASIC_V27
+            bool "M5Stack Basic v2.7 (ESP32)"
+
+        config BOARD_WAVESHARE_S3_LCD19
+            bool "Waveshare ESP32-S3-LCD-1.9 (ESP32-S3)"
+    endchoice
+
+endmenu
+
+menu "GPS Configuration"
+
+    config GPS_UART_NUM
+        int "UART port number for GPS"
+        default 2 if BOARD_M5STACK_BASIC_V27
+        default 1 if BOARD_WAVESHARE_S3_LCD19
+        range 0 2
         help
-            This config the example id for CI test. Only for internal used.
+            UART port number used for GPS communication.
 
-    config EXAMPLE_CI_PIPELINE_ID
-        int "The pipeline id for CI test"
-        default 0
+    config GPS_UART_BAUD_RATE
+        int "GPS UART baud rate"
+        default 115200 if BOARD_M5STACK_BASIC_V27
+        default 9600   if BOARD_WAVESHARE_S3_LCD19
         help
-            This config the pipeline id for CI test. Only for internal used.
+            Baud rate for GPS UART communication.
+
+    config GPS_UART_TX_PIN
+        int "GPS UART TX GPIO pin"
+        default 17 if BOARD_M5STACK_BASIC_V27
+        default 18 if BOARD_WAVESHARE_S3_LCD19
+        range 0 48
+        help
+            GPIO number for GPS UART TX (ESP to GPS).
+
+    config GPS_UART_RX_PIN
+        int "GPS UART RX GPIO pin"
+        default 16 if BOARD_M5STACK_BASIC_V27
+        default 17 if BOARD_WAVESHARE_S3_LCD19
+        range 0 48
+        help
+            GPIO number for GPS UART RX (GPS to ESP).
 
 endmenu

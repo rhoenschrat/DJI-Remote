@@ -22,6 +22,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "sdkconfig.h"
 #include "esp_err.h"
 
 /* GPS Data Structure
@@ -44,11 +45,11 @@ typedef struct {
     uint8_t fix_type;       /* Fix type: 0=No Fix, 1=2D, 2=3D (from GPGSA or inferred) */
 } gps_data_t;
 
-/* GPS Module Configuration */
-#define GPS_UART_NUM        UART_NUM_2
-#define GPS_UART_BAUD_RATE  115200      /* Baud rate for M5Stack GPS Module v2.0 (verified via auto-detection) */
-#define GPS_UART_TX_PIN     17          /* TX pin (configure via GPS module DIP switch) */
-#define GPS_UART_RX_PIN     16          /* RX pin (configure via GPS module DIP switch) */
+/* GPS Module Configuration — values set via Kconfig (see main/Kconfig.projbuild) */
+#define GPS_UART_NUM        CONFIG_GPS_UART_NUM
+#define GPS_UART_BAUD_RATE  CONFIG_GPS_UART_BAUD_RATE
+#define GPS_UART_TX_PIN     CONFIG_GPS_UART_TX_PIN
+#define GPS_UART_RX_PIN     CONFIG_GPS_UART_RX_PIN
 #define GPS_UART_BUF_SIZE   1024        /* UART buffer size */
 #define GPS_NMEA_MAX_LEN    128         /* Maximum NMEA sentence length */
 

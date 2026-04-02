@@ -81,7 +81,7 @@ offsets. The same layout is used for all three slots.
 
 | Sub-Section | X Offset | Y Offset | Width | Height |
 |-------------|----------|----------|-------|--------|
-| Selection Indicator | +1 | +1 | 98 | 4 |
+| Selection Indicator | +1 | +1 | 97 | 4 |
 | Title (Model Name) | +5 | +5 | 90 | 24 |
 | Camera Mode Icon | +5 | +29 | 90 | 24 |
 | Video Mode Text | +5 | +53 | 90 | 24 |
@@ -193,7 +193,7 @@ Indicator: Red if selected, Black if not.
 ### 3.3 Submenu Buttons
 
 - Button A: `select_icon` + "Select"
-- Button B: `next_icon` + "Next"
+- Button B: `next_icon` + "Next" (icon rotated 90° CW to point downward)
 - Button C: Empty (no function)
 
 ### 3.4 Title Text

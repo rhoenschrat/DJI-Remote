@@ -183,21 +183,26 @@ static void create_camera_block(int idx) {
     lv_obj_set_style_text_font(cb->title, L->font_heading, 0);
     lv_label_set_text(cb->title, "");
 
-    /* Camera mode icon */
-    cb->mode_icon = lv_image_create(cb->block);
-    lv_obj_set_pos(cb->mode_icon, L->cam_detail.mode_icon_x, L->cam_detail.mode_icon_y);
-    lv_image_set_src(cb->mode_icon, &lvgl_video_icon);
-    ui_style_img_recolor(cb->mode_icon, ui_clr_white());
+    /* Camera mode icon — omitted on 320x170 (vmode_w == 0) */
+    if (L->cam_detail.vmode_w > 0) {
+        cb->mode_icon = lv_image_create(cb->block);
+        lv_obj_set_pos(cb->mode_icon, L->cam_detail.mode_icon_x, L->cam_detail.mode_icon_y);
+        lv_image_set_src(cb->mode_icon, &lvgl_video_icon);
+        ui_style_img_recolor(cb->mode_icon, ui_clr_white());
 
-    /* Video mode text */
-    cb->vmode_label = lv_label_create(cb->block);
-    lv_obj_set_pos(cb->vmode_label, L->cam_detail.vmode_x, L->cam_detail.vmode_y);
-    lv_obj_set_width(cb->vmode_label, L->cam_detail.vmode_w);
-    lv_obj_set_style_text_align(cb->vmode_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_color(cb->vmode_label, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(cb->vmode_label, L->font_small, 0);
-    lv_obj_set_style_text_line_space(cb->vmode_label, L->cam_detail.vmode_line_space, 0);
-    lv_label_set_text(cb->vmode_label, "");
+        /* Video mode text */
+        cb->vmode_label = lv_label_create(cb->block);
+        lv_obj_set_pos(cb->vmode_label, L->cam_detail.vmode_x, L->cam_detail.vmode_y);
+        lv_obj_set_width(cb->vmode_label, L->cam_detail.vmode_w);
+        lv_obj_set_style_text_align(cb->vmode_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(cb->vmode_label, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(cb->vmode_label, L->font_small, 0);
+        lv_obj_set_style_text_line_space(cb->vmode_label, L->cam_detail.vmode_line_space, 0);
+        lv_label_set_text(cb->vmode_label, "");
+    } else {
+        cb->mode_icon  = NULL;
+        cb->vmode_label = NULL;
+    }
 
     /* Status icon */
     cb->status_icon = lv_image_create(cb->block);
@@ -261,11 +266,15 @@ static void create_status_bar(void) {
     lv_image_set_src(s_gps_icon, &lvgl_gps_icon);
     ui_style_img_recolor(s_gps_icon, ui_clr_red());
 
-    s_gps_text = lv_label_create(s_screen);
-    lv_obj_set_pos(s_gps_text, L->status.gps_text_x, L->status.gps_text_y);
-    lv_obj_set_style_text_color(s_gps_text, ui_clr_yellow(), 0);
-    lv_obj_set_style_text_font(s_gps_text, L->font_body, 0);
-    lv_label_set_text(s_gps_text, "");
+    if (L->status.gps_text_visible) {
+        s_gps_text = lv_label_create(s_screen);
+        lv_obj_set_pos(s_gps_text, L->status.gps_text_x, L->status.gps_text_y);
+        lv_obj_set_style_text_color(s_gps_text, ui_clr_yellow(), 0);
+        lv_obj_set_style_text_font(s_gps_text, L->font_body, 0);
+        lv_label_set_text(s_gps_text, "");
+    } else {
+        s_gps_text = NULL;
+    }
 }
 
 /* ======================================================================
@@ -280,22 +289,31 @@ static void create_button(int idx) {
     lv_obj_remove_style_all(b->container);
     lv_obj_set_pos(b->container, L->btn.x[idx], L->btn.y);
     lv_obj_set_size(b->container, L->btn.w, L->btn.h);
-    lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
-    lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b->container, 0, 0);
     lv_obj_set_scrollbar_mode(b->container, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(b->container, LV_OBJ_FLAG_SCROLLABLE);
 
+    if (L->btn_style.compact) {
+        lv_obj_set_style_bg_color(b->container, L->btn_style.bg_color[idx], 0);
+    } else {
+        lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
+    }
+    lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
+
     b->icon = lv_image_create(b->container);
-    lv_obj_set_pos(b->icon, 0, 0);
+    lv_obj_set_pos(b->icon, L->btn_style.icon_ofs_x, L->btn_style.icon_ofs_y);
     ui_style_img_recolor(b->icon, ui_clr_white());
     lv_obj_add_flag(b->icon, LV_OBJ_FLAG_HIDDEN);
 
-    b->label = lv_label_create(b->container);
-    lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
-    lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(b->label, L->font_body, 0);
-    lv_label_set_text(b->label, "");
+    if (!L->btn_style.compact) {
+        b->label = lv_label_create(b->container);
+        lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
+        lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(b->label, L->font_body, 0);
+        lv_label_set_text(b->label, "");
+    } else {
+        b->label = NULL;
+    }
 }
 
 static void create_button_bar(void) {
@@ -309,18 +327,24 @@ static void create_button_bar(void) {
 
 static void set_button(int idx, const lv_image_dsc_t *icon,
                        lv_color_t icon_clr, const char *label) {
+    const ui_layout_t *L = ui_layout_get();
     btn_widget_t *b = &s_btn[idx];
     ui_set_visible(b->container, true);
 
     if (icon) {
         lv_image_set_src(b->icon, icon);
-        ui_style_img_recolor(b->icon, icon_clr);
+        /* On compact (colored-square) buttons the icon sits on a bright
+         * background, so render it in black for contrast. */
+        lv_color_t effective_clr = L->btn_style.compact ? ui_clr_black() : icon_clr;
+        ui_style_img_recolor(b->icon, effective_clr);
         ui_set_visible(b->icon, true);
     } else {
         ui_set_visible(b->icon, false);
     }
 
-    lv_label_set_text(b->label, label ? label : "");
+    if (b->label != NULL) {
+        lv_label_set_text(b->label, label ? label : "");
+    }
 }
 
 static void hide_button(int idx) {
@@ -363,8 +387,8 @@ static void update_camera_block(int idx) {
     bool show_full  = (conn == CAM_STATE_CONNECTED);
 
     ui_set_visible(cb->title,      show_title);
-    ui_set_visible(cb->mode_icon,  show_full);
-    ui_set_visible(cb->vmode_label, show_full);
+    if (cb->mode_icon)  ui_set_visible(cb->mode_icon,  show_full);
+    if (cb->vmode_label) ui_set_visible(cb->vmode_label, show_full);
     ui_set_visible(cb->time_label, show_full);
     ui_set_visible(cb->sd_icon,    show_full);
     ui_set_visible(cb->sd_text,    show_full);
@@ -377,19 +401,20 @@ static void update_camera_block(int idx) {
 
     if (!show_full) return;
 
-    /* Camera mode icon */
-    lv_image_set_src(cb->mode_icon, get_mode_icon(cam_mode));
-    ui_style_img_recolor(cb->mode_icon, ui_clr_white());
+    /* Camera mode icon + video mode text (absent on 320x170) */
+    if (cb->mode_icon != NULL) {
+        lv_image_set_src(cb->mode_icon, get_mode_icon(cam_mode));
+        ui_style_img_recolor(cb->mode_icon, ui_clr_white());
 
-    /* Video mode text */
-    if (st->camera_supports_new_status_push && st->mode_name[0] != '\0') {
-        lv_label_set_text_fmt(cb->vmode_label, "%s\n%s",
-                              st->mode_name, st->mode_param);
-    } else {
-        const char *res = short_resolution(st->video_resolution);
-        const char *fps = fps_idx_to_string((fps_idx_t)st->fps_idx);
-        const char *eis = eis_mode_to_string((eis_mode_t)st->eis_mode);
-        lv_label_set_text_fmt(cb->vmode_label, "%s\n%s %s", res, fps, eis);
+        if (st->camera_supports_new_status_push && st->mode_name[0] != '\0') {
+            lv_label_set_text_fmt(cb->vmode_label, "%s\n%s",
+                                  st->mode_name, st->mode_param);
+        } else {
+            const char *res = short_resolution(st->video_resolution);
+            const char *fps = fps_idx_to_string((fps_idx_t)st->fps_idx);
+            const char *eis = eis_mode_to_string((eis_mode_t)st->eis_mode);
+            lv_label_set_text_fmt(cb->vmode_label, "%s\n%s %s", res, fps, eis);
+        }
     }
 
     /* Recording time */
@@ -437,18 +462,23 @@ static void update_camera_block(int idx) {
  * ====================================================================== */
 
 static void update_gps(void) {
+    const ui_layout_t *L = ui_layout_get();
     bool has_fix = gps_has_fix();
     gps_data_t gps_data;
 
     if (has_fix && gps_get_data(&gps_data) == ESP_OK) {
-        ui_style_img_recolor(s_gps_icon, ui_clr_yellow());
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%.2f, %.2f",
-                 gps_data.latitude, gps_data.longitude);
-        lv_label_set_text(s_gps_text, buf);
+        ui_style_img_recolor(s_gps_icon, L->status.gps_fix_color);
+        if (s_gps_text != NULL) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.2f, %.2f",
+                     gps_data.latitude, gps_data.longitude);
+            lv_label_set_text(s_gps_text, buf);
+        }
     } else {
         ui_style_img_recolor(s_gps_icon, ui_clr_red());
-        lv_label_set_text(s_gps_text, "");
+        if (s_gps_text != NULL) {
+            lv_label_set_text(s_gps_text, "");
+        }
     }
 }
 
