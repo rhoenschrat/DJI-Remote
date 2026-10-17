@@ -7,3 +7,4 @@
 sdkconfig.old
 /release
 /.cache
+/.idf

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Run idf.py with the project-local ESP-IDF, from any directory and without
+# prior environment setup.
+#
+# Usage: ./idf <idf.py arguments>
+#   ./idf build
+#   ./idf -p /dev/cu.usbserial-XXXX flash monitor
+
+set -euo pipefail
+
+source "$(dirname "$0")/tools/idf/env.sh"
+
+if ! idf_is_installed; then
+    echo "ESP-IDF $IDF_VERSION is not installed. Run: tools/idf/setup.sh" >&2
+    exit 1
+fi
+
+# export.sh is not written for "set -eu"; relax it while sourcing. Its
+# progress chatter goes to stderr, so only show it if activation fails.
+set +eu
+if ! source "$IDF_PATH/export.sh" >"$IDF_HOME/.export.log" 2>&1; then
+    cat "$IDF_HOME/.export.log" >&2
+    echo "ESP-IDF activation failed. Try: tools/idf/setup.sh --force" >&2
+    exit 1
+fi
+set -eu
+exec idf.py -C "$PROJECT_ROOT" "$@"
