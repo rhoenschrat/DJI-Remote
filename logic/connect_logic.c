@@ -78,6 +78,10 @@
 #define LINK_EVT_POLL_MS          500
 #define TEARDOWN_POLL_MS          100
 
+/* Handshake: wait for the camera's acknowledgement of our 0x00/0x19
+ * request (and for its fallback command frame) */
+#define HANDSHAKE_ACK_TIMEOUT_MS  2000
+
 /* True once ble_init() succeeded (replaces the former global connect_state) */
 static bool s_ble_initialized = false;
 
@@ -684,14 +688,13 @@ int connect_logic_protocol_connect(int camera_index, uint32_t device_id, uint8_t
 
     // STEP1: Send connection request command to camera
     ESP_LOGI(TAG, "Sending connection request to camera %d...", camera_index);
-    CommandResult result = send_command(camera_index, 0x00, 0x19, CMD_WAIT_RESULT, &connection_request, seq, 1000);
+    CommandResult result = send_command(camera_index, 0x00, 0x19, CMD_WAIT_RESULT, &connection_request, seq, HANDSHAKE_ACK_TIMEOUT_MS);
 
     /**** Connection issue: camera may return either response frame or command frame ****/
 
     if (result.structure == NULL) {
         // If a command frame is sent, execute this block of code
 
-        // Directly call data_wait_for_result_by_cmd(0x00, 0x19, 30000, &received_seq, &parse_result, &parse_result_length);
         
         // If != OK, it means no message was received, timeout occurred
         
@@ -699,7 +702,7 @@ int connect_logic_protocol_connect(int camera_index, uint32_t device_id, uint8_t
         void *parse_result = NULL;
         size_t parse_result_length = 0;
         uint16_t received_seq = 0;
-        esp_err_t ret = data_wait_for_result_by_cmd(0x00, 0x19, 1000, &received_seq, &parse_result, &parse_result_length);
+        esp_err_t ret = data_wait_for_result_by_cmd(camera_index, 0x00, 0x19, HANDSHAKE_ACK_TIMEOUT_MS, &received_seq, &parse_result, &parse_result_length);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Timeout or error waiting for camera connection command, GOTO Failed.");
             if (camera_index >= 0 && camera_index < 3) {
@@ -733,7 +736,7 @@ wait_for_camera_command:
     void *parse_result = NULL;
     size_t parse_result_length = 0;
     uint16_t received_seq = 0;
-    esp_err_t ret = data_wait_for_result_by_cmd(0x00, 0x19, 30000, &received_seq, &parse_result, &parse_result_length);
+    esp_err_t ret = data_wait_for_result_by_cmd(camera_index, 0x00, 0x19, 30000, &received_seq, &parse_result, &parse_result_length);
 
     if (ret != ESP_OK || parse_result == NULL) {
         ESP_LOGE(TAG, "Timeout or error waiting for camera connection command");

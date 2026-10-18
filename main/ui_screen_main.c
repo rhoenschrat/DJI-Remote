@@ -50,6 +50,8 @@ typedef struct {
 static lv_obj_t    *s_screen       = NULL;
 static cam_block_t  s_cam[NUM_CAMERAS];
 static lv_obj_t    *s_notification = NULL;
+/* One-shot timer that clears a posted (non-blocking) notification */
+static lv_timer_t  *s_notif_timer = NULL;
 static lv_obj_t    *s_gps_icon     = NULL;
 static lv_obj_t    *s_gps_text     = NULL;
 static btn_widget_t s_btn[3];
@@ -665,6 +667,7 @@ void ui_screen_main_update(void) {
 }
 
 void ui_screen_main_destroy(void) {
+    ui_screen_main_cancel_notification_timer();
     if (s_screen != NULL) {
         lv_obj_delete(s_screen);
         s_screen = NULL;
@@ -690,4 +693,31 @@ void ui_screen_main_set_notification(const char *text, lv_color_t color) {
 void ui_screen_main_clear_notification(void) {
     if (s_notification == NULL) return;
     lv_label_set_text(s_notification, "");
+}
+
+/* LVGL task context: clears the posted text and ends the one-shot timer */
+static void notif_timer_cb(lv_timer_t *t) {
+    if (s_notification != NULL) {
+        lv_label_set_text(s_notification, "");
+    }
+    lv_timer_delete(t);
+    s_notif_timer = NULL;
+}
+
+void ui_screen_main_cancel_notification_timer(void) {
+    if (s_notif_timer != NULL) {
+        lv_timer_delete(s_notif_timer);
+        s_notif_timer = NULL;
+    }
+}
+
+void ui_screen_main_post_notification(const char *text, lv_color_t color, uint32_t duration_ms) {
+    if (s_notification == NULL) return;
+    ui_screen_main_set_notification(text, color);
+    if (s_notif_timer != NULL) {
+        lv_timer_set_period(s_notif_timer, duration_ms);
+        lv_timer_reset(s_notif_timer);
+    } else {
+        s_notif_timer = lv_timer_create(notif_timer_cb, duration_ms, NULL);
+    }
 }

@@ -33,6 +33,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdatomic.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -54,7 +55,8 @@
 /* Global sequence number generator for command tracking
  * Each command gets a unique sequence number to match with responses
  */
-uint16_t s_current_seq = 0;
+/* Shared by the main, GPS, notify and command-worker tasks */
+static atomic_uint s_current_seq = 0;
 
 /**
  * @brief Generate unique sequence number for command tracking
@@ -66,7 +68,8 @@ uint16_t s_current_seq = 0;
  * @return Unique 16-bit sequence number
  */
 uint16_t generate_seq(void) {
-    return s_current_seq += 1;
+    /* Atomic fetch-add, masked to 16 bit; wraps like the former ++ */
+    return (uint16_t)(atomic_fetch_add(&s_current_seq, 1) + 1);
 }
 
 /**
@@ -210,7 +213,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
             }
             ESP_LOGI(TAG, "Camera %d: Data frame sent, waiting for response...", camera_index);
             
-            ret = data_wait_for_result_by_seq(seq, timeout_ms, &structure_data, &structure_data_length);
+            ret = data_wait_for_result_by_seq(camera_index, seq, timeout_ms, &structure_data, &structure_data_length);
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "Camera %d: No result received, but continuing (seq=0x%04X)", camera_index, seq);
             }
@@ -227,7 +230,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
             }
             ESP_LOGI(TAG, "Camera %d: Data frame sent, waiting for result...", camera_index);
 
-            ret = data_wait_for_result_by_seq(seq, timeout_ms, &structure_data, &structure_data_length);
+            ret = data_wait_for_result_by_seq(camera_index, seq, timeout_ms, &structure_data, &structure_data_length);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Camera %d: Failed to get parse result for seq=0x%04X, error: 0x%x", camera_index, seq, ret);
                 free(protocol_frame);
@@ -1009,42 +1012,4 @@ esp_err_t command_logic_send_highlight_for_slot(int slot_index) {
     
     // Use generic key reporting function with QS button key code (0x02)
     return command_logic_send_key_report_for_slot(slot_index, 0x02, 0x01, 0x00);
-}
-
-/**
- * @brief Send highlight tag command to all eligible cameras
- * 
- * Sends highlight tag commands to all camera slots that meet the conditions:
- * - Paired and connected
- * - Awake (not sleeping)
- * - Currently recording
- * - Support highlight tags (Action 4, 5 Pro, 6, not Osmo 360)
- * 
- * @return ESP_OK if at least one highlight was sent, ESP_FAIL if none eligible
- */
-esp_err_t command_logic_send_highlight_for_all_active(void) {
-    int success_count = 0;
-    
-    for (int i = 0; i < NUM_CAMERAS; i++) {
-        // Check all conditions for this slot
-        if (command_logic_slot_is_paired(i) &&
-            command_logic_slot_is_connected(i) &&
-            command_logic_slot_is_awake(i) &&
-            command_logic_slot_is_recording(i) &&
-            command_logic_slot_supports_highlight(i)) {
-            
-            esp_err_t ret = command_logic_send_highlight_for_slot(i);
-            if (ret == ESP_OK) {
-                success_count++;
-            }
-        }
-    }
-    
-    if (success_count > 0) {
-        ESP_LOGI(TAG, "Highlight tag sent to %d camera(s)", success_count);
-        return ESP_OK;
-    } else {
-        ESP_LOGD(TAG, "No eligible cameras for highlight tag");
-        return ESP_FAIL;
-    }
 }

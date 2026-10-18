@@ -160,6 +160,8 @@ void ui_execute_main_screen_action(void);
 void ui_cycle_camera_selection(void);
 void ui_show_message(const char* message, uint16_t color, int duration_ms);
 void ui_show_shutter_bottom_message(const char* message, uint16_t color, int duration_ms);
+void ui_post_shutter_message(const char *message, uint16_t color, uint32_t duration_ms);
+void ui_process_command_results(void);
 void ui_show_not_connected_message(void);
 const char* ui_get_camera_model_name(uint32_t device_id);
 esp_err_t save_all_cameras_to_nvs(void);

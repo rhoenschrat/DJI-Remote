@@ -1177,6 +1177,11 @@ esp_err_t ble_write_without_response(uint16_t conn_id, uint16_t handle,
         ESP_LOGW(TAG, "Not connected or invalid conn_id, skip write_without_response");
         return ESP_FAIL;
     }
+    if (handle == 0) {
+        /* Discovery not finished; an ATT write to handle 0 can wedge the camera */
+        ESP_LOGW(TAG, "Camera %d: write_no_rsp to handle 0 refused", p->camera_index);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     int rc = ble_gattc_write_no_rsp_flat(conn_id, handle, data, (uint16_t)length);
     if (rc != 0) {
@@ -1198,6 +1203,11 @@ esp_err_t ble_write_with_response(uint16_t conn_id, uint16_t handle,
     if (!p || !p->connection_status.is_connected) {
         ESP_LOGW(TAG, "Not connected or invalid conn_id, skip write_with_response");
         return ESP_FAIL;
+    }
+    if (handle == 0) {
+        /* Discovery not finished; an ATT write to handle 0 can wedge the camera */
+        ESP_LOGW(TAG, "Camera %d: write_rsp to handle 0 refused", p->camera_index);
+        return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(TAG, "Camera %d: write_rsp conn=%d handle=0x%x len=%d",
