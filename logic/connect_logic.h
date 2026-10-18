@@ -81,9 +81,11 @@ void connect_logic_handle_link_lost(int slot, int reason, uint32_t silent_ms);
  */
 bool connect_logic_take_link_lost(int slot);
 
-/* Max. time the UI waits for an unresponsive link to be released before it
- * reconnects (ADR-019) */
-#define UNRESPONSIVE_RELEASE_WAIT_MS 3000
+/* Link-release wait before a user reconnect of an unresponsive slot
+ * (ADR-019, ADR-021): remaining supervision time + margin, clamped */
+#define LINK_RELEASE_MARGIN_MS     1000
+#define LINK_RELEASE_WAIT_MIN_MS   3000
+#define LINK_RELEASE_WAIT_MAX_MS   6000    /* supervision floor (5 s) + margin */
 
 /**
  * @brief True if the liveness watchdog marked the slot unresponsive (ADR-019)
@@ -94,17 +96,29 @@ bool connect_logic_slot_is_unresponsive(int slot);
  * @brief Close a slot's link and wait until it is released (main task only)
  *
  * Expected disconnect via connect_logic_ble_disconnect(), then polls
- * ble_is_link_released() every 100 ms up to @p timeout_ms and finally resets
- * the slot to paired-disconnected.
+ * ble_is_link_released() every 100 ms and finally resets the slot to
+ * paired-disconnected.
  *
  * Waiting matters: if a new connection starts before the old link's
  * BLE_GAP_EVENT_DISCONNECT was processed, that late event can hit the profile
  * of the new link when NimBLE reuses the connection handle.
  *
- * Blocks; never call with the LVGL lock held.
+ * How long: a peer that still answers on the link layer (hung camera,
+ * ADR-019) acknowledges the terminate at once. A peer that is out of radio
+ * range never does; the controller then releases the link only when the
+ * supervision timeout expires, counted from the last packet received. The
+ * wait is therefore the applied supervision timeout minus the time since the
+ * last notification, plus LINK_RELEASE_MARGIN_MS, clamped to
+ * [LINK_RELEASE_WAIT_MIN_MS, LINK_RELEASE_WAIT_MAX_MS]. A camera that
+ * negotiated more than 5 s can exceed the cap: the reconnect is then
+ * aborted as before and the slot stays paired-disconnected until the
+ * link-lost event arrives.
+ *
+ * Blocks for up to LINK_RELEASE_WAIT_MAX_MS; never call with the LVGL lock
+ * held.
  *
  * @return 0 if the link was released, -1 on timeout (slot is reset either way)
  */
-int connect_logic_teardown_and_wait(int slot, uint32_t timeout_ms);
+int connect_logic_teardown_and_wait(int slot);
 
 #endif

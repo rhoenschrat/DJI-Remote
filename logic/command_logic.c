@@ -168,7 +168,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
         return result;
     }
 
-    ESP_LOGI(TAG, "Protocol frame created successfully, length: %zu", frame_length);
+    ESP_LOGD(TAG, "Protocol frame created successfully, length: %zu", frame_length);
 
     // Print ByteArray format for debugging using ESP_LOGD
     // Build hex dump string (max 512 bytes for hex representation: 256 bytes * 2 + commas)
@@ -200,7 +200,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
                 free(protocol_frame);
                 return result;
             }
-            ESP_LOGI(TAG, "Camera %d: Data frame sent without response.", camera_index);
+            ESP_LOGD(TAG, "Camera %d: Data frame sent without response.", camera_index);
             break;
 
         case CMD_RESPONSE_OR_NOT:
@@ -211,7 +211,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
                 free(protocol_frame);
                 return result;
             }
-            ESP_LOGI(TAG, "Camera %d: Data frame sent, waiting for response...", camera_index);
+            ESP_LOGD(TAG, "Camera %d: Data frame sent, waiting for response...", camera_index);
             
             ret = data_wait_for_result_by_seq(camera_index, seq, timeout_ms, &structure_data, &structure_data_length);
             if (ret != ESP_OK) {
@@ -228,7 +228,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
                 free(protocol_frame);
                 return result;
             }
-            ESP_LOGI(TAG, "Camera %d: Data frame sent, waiting for result...", camera_index);
+            ESP_LOGD(TAG, "Camera %d: Data frame sent, waiting for result...", camera_index);
 
             ret = data_wait_for_result_by_seq(camera_index, seq, timeout_ms, &structure_data, &structure_data_length);
             if (ret != ESP_OK) {
@@ -252,7 +252,7 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
     }
 
     free(protocol_frame);
-    ESP_LOGI(TAG, "Command executed successfully");
+    ESP_LOGD(TAG, "Command executed successfully");
 
     result.structure = structure_data;
     result.length = structure_data_length;
@@ -287,7 +287,7 @@ camera_mode_switch_response_frame_t* command_logic_switch_camera_mode(int camera
                                               // 预留字段
     };
 
-    ESP_LOGI(TAG, "Constructed command frame: device_id=0x%08X, mode=%d", (unsigned int)command_frame.device_id, command_frame.mode);
+    ESP_LOGD(TAG, "Constructed command frame: device_id=0x%08X, mode=%d", (unsigned int)command_frame.device_id, command_frame.mode);
 
     CommandResult result = send_command(
         camera_index,
@@ -306,7 +306,7 @@ camera_mode_switch_response_frame_t* command_logic_switch_camera_mode(int camera
 
     camera_mode_switch_response_frame_t *response = (camera_mode_switch_response_frame_t *)result.structure;
 
-    ESP_LOGI(TAG, "Received response: ret_code=%d", response->ret_code);
+    ESP_LOGD(TAG, "Received response: ret_code=%d", response->ret_code);
     return response;
 }
 
@@ -325,7 +325,7 @@ camera_mode_switch_response_frame_t* command_logic_switch_camera_mode(int camera
  *                                         返回解析后的版本信息结构体，如果发生错误返回 NULL
  */
 version_query_response_frame_t* command_logic_get_version(int camera_index) {
-    ESP_LOGI(TAG, "%s: Camera %d: Querying device version", __FUNCTION__, camera_index);
+    ESP_LOGD(TAG, "%s: Camera %d: Querying device version", __FUNCTION__, camera_index);
     
     // Check per-camera connection state (not global state)
     if (!ble_is_camera_connected(camera_index)) {
@@ -370,7 +370,7 @@ version_query_response_frame_t* command_logic_get_version(int camera_index) {
  * @return ESP_OK on success, error code on failure
  */
 esp_err_t command_logic_start_record_async(int camera_index) {
-    ESP_LOGI(TAG, "%s: Camera %d: Sending start recording command (0x1D/0x03) - non-blocking", __FUNCTION__, camera_index);
+    ESP_LOGD(TAG, "%s: Camera %d: Sending start recording command (0x1D/0x03) - non-blocking", __FUNCTION__, camera_index);
 
     // Check per-camera connection state (not global state)
     if (!ble_is_camera_connected(camera_index)) {
@@ -386,7 +386,7 @@ esp_err_t command_logic_start_record_async(int camera_index) {
         .reserved = {0x00, 0x00, 0x00, 0x00}
     };
 
-    ESP_LOGI(TAG, "Sending start record command (async): device_id=0x%08X, record_ctrl=0x%02X", 
+    ESP_LOGD(TAG, "Sending start record command (async): device_id=0x%08X, record_ctrl=0x%02X", 
              command_frame.device_id, command_frame.record_ctrl);
 
     send_command(
@@ -419,7 +419,7 @@ esp_err_t command_logic_start_record_async(int camera_index) {
  * @return record_control_response_frame_t* Returns parsed response structure pointer, NULL on error
  */
 record_control_response_frame_t* command_logic_start_record(int camera_index) {
-    ESP_LOGI(TAG, "%s: Camera %d: Sending start recording command (0x1D/0x03)", __FUNCTION__, camera_index);
+    ESP_LOGD(TAG, "%s: Camera %d: Sending start recording command (0x1D/0x03)", __FUNCTION__, camera_index);
 
     // Check per-camera connection state (not global state)
     if (!ble_is_camera_connected(camera_index)) {
@@ -435,7 +435,7 @@ record_control_response_frame_t* command_logic_start_record(int camera_index) {
         .reserved = {0x00, 0x00, 0x00, 0x00}
     };
 
-    ESP_LOGI(TAG, "Sending start record command: device_id=0x%08X, record_ctrl=0x%02X", 
+    ESP_LOGD(TAG, "Sending start record command: device_id=0x%08X, record_ctrl=0x%02X", 
              command_frame.device_id, command_frame.record_ctrl);
 
     CommandResult result = send_command(
@@ -455,7 +455,7 @@ record_control_response_frame_t* command_logic_start_record(int camera_index) {
 
     record_control_response_frame_t *response = (record_control_response_frame_t *)result.structure;
 
-    ESP_LOGI(TAG, "Start Record Response: ret_code=%d (waiting for status push to confirm actual state)", response->ret_code);
+    ESP_LOGD(TAG, "Start Record Response: ret_code=%d (waiting for status push to confirm actual state)", response->ret_code);
 
     return response;
 }
@@ -470,7 +470,7 @@ record_control_response_frame_t* command_logic_start_record(int camera_index) {
  * @return ESP_OK on success, error code on failure
  */
 esp_err_t command_logic_stop_record_async(int camera_index) {
-    ESP_LOGI(TAG, "%s: Camera %d: Sending stop recording command (0x1D/0x03) - non-blocking", __FUNCTION__, camera_index);
+    ESP_LOGD(TAG, "%s: Camera %d: Sending stop recording command (0x1D/0x03) - non-blocking", __FUNCTION__, camera_index);
 
     // Check per-camera connection state (not global state)
     if (!ble_is_camera_connected(camera_index)) {
@@ -486,7 +486,7 @@ esp_err_t command_logic_stop_record_async(int camera_index) {
         .reserved = {0x00, 0x00, 0x00, 0x00}
     };
 
-    ESP_LOGI(TAG, "Sending stop record command (async): device_id=0x%08X, record_ctrl=0x%02X", 
+    ESP_LOGD(TAG, "Sending stop record command (async): device_id=0x%08X, record_ctrl=0x%02X", 
              command_frame.device_id, command_frame.record_ctrl);
 
     send_command(
@@ -519,7 +519,7 @@ esp_err_t command_logic_stop_record_async(int camera_index) {
  * @return record_control_response_frame_t* Returns parsed response structure pointer, NULL on error
  */
 record_control_response_frame_t* command_logic_stop_record(int camera_index) {
-    ESP_LOGI(TAG, "%s: Camera %d: Sending stop recording command (0x1D/0x03)", __FUNCTION__, camera_index);
+    ESP_LOGD(TAG, "%s: Camera %d: Sending stop recording command (0x1D/0x03)", __FUNCTION__, camera_index);
 
     // Check per-camera connection state (not global state)
     if (!ble_is_camera_connected(camera_index)) {
@@ -535,7 +535,7 @@ record_control_response_frame_t* command_logic_stop_record(int camera_index) {
         .reserved = {0x00, 0x00, 0x00, 0x00}
     };
 
-    ESP_LOGI(TAG, "Sending stop record command: device_id=0x%08X, record_ctrl=0x%02X", 
+    ESP_LOGD(TAG, "Sending stop record command: device_id=0x%08X, record_ctrl=0x%02X", 
              command_frame.device_id, command_frame.record_ctrl);
 
     CommandResult result = send_command(
@@ -555,7 +555,7 @@ record_control_response_frame_t* command_logic_stop_record(int camera_index) {
 
     record_control_response_frame_t *response = (record_control_response_frame_t *)result.structure;
 
-    ESP_LOGI(TAG, "Stop Record Response: ret_code=%d (waiting for status push to confirm actual state)", response->ret_code);
+    ESP_LOGD(TAG, "Stop Record Response: ret_code=%d (waiting for status push to confirm actual state)", response->ret_code);
 
     return response;
 }
@@ -605,7 +605,7 @@ key_report_response_frame_t* command_logic_key_report_qs(int camera_index) {
 
     key_report_response_frame_t *response = (key_report_response_frame_t *)result.structure;
 
-    ESP_LOGI(TAG, "Key Report Response: ret_code=%d", response->ret_code);
+    ESP_LOGD(TAG, "Key Report Response: ret_code=%d", response->ret_code);
 
     return response;
 }
@@ -620,7 +620,7 @@ key_report_response_frame_t* command_logic_key_report_qs(int camera_index) {
 camera_power_mode_switch_response_frame_t* command_logic_power_mode_switch_sleep(int camera_index) {
     // Log message indicating power mode switch to sleep
     // 睡眠模式切换日志
-    ESP_LOGI(TAG, "%s: Reporting power mode switch to sleep", __FUNCTION__);
+    ESP_LOGD(TAG, "%s: Reporting power mode switch to sleep", __FUNCTION__);
 
     // Check if the protocol is connected
     // 检查协议是否已连接
@@ -666,7 +666,7 @@ camera_power_mode_switch_response_frame_t* command_logic_power_mode_switch_sleep
 
     // Log the response information for power mode switch
     // 记录电源模式切换的响应信息
-    ESP_LOGI(TAG, "Power Mode Switch Response: ret_code=%d", response->ret_code);
+    ESP_LOGD(TAG, "Power Mode Switch Response: ret_code=%d", response->ret_code);
 
     return response;  // Return the parsed response frame
                       // 返回解析后的响应帧
@@ -733,7 +733,7 @@ camera_power_mode_switch_response_frame_t* command_logic_power_mode_switch_wake(
 
     // Log the response information for power mode switch
     // 记录电源模式切换的响应信息
-    ESP_LOGI(TAG, "Power Mode Switch Response: ret_code=%d", response->ret_code);
+    ESP_LOGD(TAG, "Power Mode Switch Response: ret_code=%d", response->ret_code);
 
     return response;  // Return the parsed response frame
                       // 返回已解析的响应帧
@@ -946,7 +946,7 @@ esp_err_t command_logic_send_key_report_for_slot(int camera_index, uint8_t key_c
         .key_value = key_value
     };
     
-    ESP_LOGI(TAG, "Camera %d: Sending Key Reporting command (key_code=0x%02X, mode=0x%02X, key_value=0x%02X)", 
+    ESP_LOGD(TAG, "Camera %d: Sending Key Reporting command (key_code=0x%02X, mode=0x%02X, key_value=0x%02X)", 
              camera_index, key_code, mode, key_value);
     
     // Send command without waiting for response (non-blocking)
@@ -966,7 +966,7 @@ esp_err_t command_logic_send_key_report_for_slot(int camera_index, uint8_t key_c
         free(result.structure);
     }
     
-    ESP_LOGI(TAG, "Camera %d: Key Reporting command sent", camera_index);
+    ESP_LOGD(TAG, "Camera %d: Key Reporting command sent", camera_index);
     return ESP_OK;
 }
 

@@ -133,6 +133,9 @@ static QueueHandle_t notify_queue = NULL;
  * host task, reported by the notify task */
 static atomic_uint s_notify_dropped = 0;
 
+/* Same drops per slot, cumulative since boot (BLE_DIAG line) */
+static atomic_uint s_notify_dropped_slot[DATA_NUM_SLOTS];
+
 /* TX pacing state per slot */
 static SemaphoreHandle_t s_tx_mutex[DATA_NUM_SLOTS];
 static TickType_t s_last_tx_tick[DATA_NUM_SLOTS];
@@ -332,9 +335,9 @@ static void cleanup_old_entries(TimerHandle_t xTimer) {
         if (e->in_use && e->waiters == 0 &&
             (TickType_t)(now - e->last_access_time) > pdMS_TO_TICKS(MAX_ENTRY_AGE * 1000)) {
             if (e->is_seq_based) {
-                ESP_LOGI(TAG, "Cleaning up unused entry slot=%d seq=0x%04X", e->slot, e->seq);
+                ESP_LOGD(TAG, "Cleaning up unused entry slot=%d seq=0x%04X", e->slot, e->seq);
             } else {
-                ESP_LOGI(TAG, "Cleaning up unused entry slot=%d cmd_set=0x%02X cmd_id=0x%02X",
+                ESP_LOGD(TAG, "Cleaning up unused entry slot=%d cmd_set=0x%02X cmd_id=0x%02X",
                          e->slot, e->cmd_set, e->cmd_id);
             }
             free_entry(e);
@@ -789,6 +792,20 @@ static void process_notification_data(int camera_index, const uint8_t *raw_data,
  *
  * Copy and enqueue only (ADR-018). Drops are counted, never logged here.
  */
+static inline void count_notify_drop(int camera_index) {
+    atomic_fetch_add(&s_notify_dropped, 1);
+    if (camera_index >= 0 && camera_index < DATA_NUM_SLOTS) {
+        atomic_fetch_add(&s_notify_dropped_slot[camera_index], 1);
+    }
+}
+
+unsigned int data_get_notify_drops(int slot) {
+    if (slot < 0 || slot >= DATA_NUM_SLOTS) {
+        return 0;
+    }
+    return atomic_load(&s_notify_dropped_slot[slot]);
+}
+
 void receive_camera_notify_handler(int camera_index, const uint8_t *raw_data, size_t raw_data_length) {
     if (!raw_data || raw_data_length < 2 || notify_queue == NULL) {
         return;
@@ -796,7 +813,7 @@ void receive_camera_notify_handler(int camera_index, const uint8_t *raw_data, si
 
     uint8_t *data_copy = malloc(raw_data_length);
     if (data_copy == NULL) {
-        atomic_fetch_add(&s_notify_dropped, 1);
+        count_notify_drop(camera_index);
         return;
     }
     memcpy(data_copy, raw_data, raw_data_length);
@@ -808,7 +825,7 @@ void receive_camera_notify_handler(int camera_index, const uint8_t *raw_data, si
     };
 
     if (xQueueSend(notify_queue, &notify_data, 0) != pdTRUE) {
-        atomic_fetch_add(&s_notify_dropped, 1);
+        count_notify_drop(camera_index);
         free(data_copy);
     }
 }

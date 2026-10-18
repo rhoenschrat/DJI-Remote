@@ -68,6 +68,13 @@ typedef struct {
 
     /* esp_timer time (us) of the last notification; 0 = none since connect */
     int64_t last_rx_us;
+
+    /* Applied supervision timeout of the current link in 10 ms units;
+     * 0 = no link (ADR-021). Written on the host task only. */
+    uint16_t supervision_timeout;
+
+    /* One supervision-timeout correction per link (ADR-021); reset on connect */
+    bool sto_corrected;
 } ble_profile_t;
 
 /* Array of BLE profiles for multi-camera support */
@@ -124,6 +131,28 @@ bool ble_is_camera_connected(int camera_index);
 bool ble_is_link_released(int camera_index);
 
 void ble_set_target_device(int camera_index, const char* name, const uint8_t* mac);
+
+/* Minimum supervision timeout in 10 ms units (5 s), used for our own
+ * connect and as floor for camera-requested updates (ADR-021) */
+#define BLE_SUPERVISION_TIMEOUT_FLOOR 500
+
+/* Per-slot link diagnostics (liveness estimate, BLE_DIAG line) */
+typedef struct {
+    bool     link_up;           /* ble_is_camera_connected() */
+    uint32_t rx_age_ms;         /* UINT32_MAX if nothing received on this link */
+    uint32_t supervision_ms;    /* applied supervision timeout in ms, 0 if no link */
+    uint32_t gatt_failures;     /* failed GATT writes, cumulative since boot */
+    int      last_disc_reason;  /* last disconnect reason, -1 if never disconnected */
+} ble_slot_diag_t;
+
+/**
+ * @brief Snapshot of a slot's link diagnostics (any task)
+ *
+ * Read without locking. A torn read of the 64-bit RX timestamp on a 32-bit
+ * CPU is possible and acceptable for diagnostics and the release-wait
+ * estimate.
+ */
+esp_err_t ble_get_slot_diag(int camera_index, ble_slot_diag_t *out);
 
 esp_err_t ble_start_scan(scan_mode_t mode, int target_slot, uint32_t timeout_ms);
 esp_err_t ble_stop_scan(void);

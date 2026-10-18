@@ -193,7 +193,7 @@ int protocol_parse_notification(const uint8_t *frame_data, size_t frame_length, 
 
     frame_out->crc32 = crc32_received;
 
-    ESP_LOGI(TAG, "Frame parsed successfully");
+    ESP_LOGD(TAG, "Frame parsed successfully");
     return 0;
 }
 
@@ -233,7 +233,7 @@ void *protocol_parse_data(const uint8_t *data, size_t data_length, uint8_t cmd_t
     const uint8_t *response_data = &data[2];
     size_t response_length = data_length - 2;
 
-    ESP_LOGI(TAG, "CmdSet: 0x%02X, CmdID: 0x%02X", cmd_set, cmd_id);
+    ESP_LOGD(TAG, "CmdSet: 0x%02X, CmdID: 0x%02X", cmd_set, cmd_id);
 
     void *response_struct = malloc(response_length);
     if (response_struct == NULL)
@@ -250,7 +250,7 @@ void *protocol_parse_data(const uint8_t *data, size_t data_length, uint8_t cmd_t
 
     if (result == 0)
     {
-        ESP_LOGI(TAG, "Data parsed successfully for CmdSet 0x%02X and CmdID 0x%02X", cmd_set, cmd_id);
+        ESP_LOGD(TAG, "Data parsed successfully for CmdSet 0x%02X and CmdID 0x%02X", cmd_set, cmd_id);
         if (data_length_without_cmd_out != NULL)
         {
             *data_length_without_cmd_out = response_length;

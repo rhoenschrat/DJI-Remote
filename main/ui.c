@@ -1854,7 +1854,7 @@ static void ui_handle_settings_screen_button_a(void) {
                 lvgl_port_unlock();
 
                 int result = -1;
-                if (connect_logic_teardown_and_wait(active_slot, UNRESPONSIVE_RELEASE_WAIT_MS) == 0) {
+                if (connect_logic_teardown_and_wait(active_slot) == 0) {
                     result = ui_perform_complete_reconnection(active_slot, true);
                 }
 
@@ -2046,7 +2046,10 @@ void ui_handle_button_a(void) {
     if (s_pending_unresponsive_reconnect >= 0) {
         int cam_idx = s_pending_unresponsive_reconnect;
         s_pending_unresponsive_reconnect = -1;
-        if (connect_logic_teardown_and_wait(cam_idx, UNRESPONSIVE_RELEASE_WAIT_MS) == 0) {
+        // Show the connecting icon now: the release wait can take up to
+        // LINK_RELEASE_WAIT_MAX_MS for a camera that is out of range
+        ui_update_display();
+        if (connect_logic_teardown_and_wait(cam_idx) == 0) {
             int result = ui_perform_complete_reconnection(cam_idx, true);
             ESP_LOGI(TAG, "Unresponsive reconnect for camera %d: %s",
                      cam_idx, result == 0 ? "successful" : "failed");

@@ -5,14 +5,14 @@
  * (u-blox M8130K) connected via UART on the M-Bus connector.
  * 
  * Features:
- * - UART2 communication with GPS module
+ * - UART communication with GPS module (port and pins per board, Kconfig)
  * - NMEA sentence parsing (GPGGA, GPRMC, GPGSV)
  * - Thread-safe GPS data access
  * - Automatic fix detection
  * - Satellite count tracking
  * 
  * Hardware: M5Stack Module GPS v2.0 (u-blox M8130K)
- * Connection: M-Bus connector (UART2)
+ * Connection: M-Bus connector (M5Stack: UART2) or board UART (Waveshare: UART1)
  * Protocol: NMEA 0183
  * Baud Rate: 9600 or 115200 (configurable)
  */
@@ -56,7 +56,7 @@ typedef struct {
 /**
  * @brief Initialize GPS module
  * 
- * Initializes UART2 for communication with the GPS module and starts
+ * Initializes the configured UART for communication with the GPS module and starts
  * the NMEA parsing task.
  * 
  * @return ESP_OK on success, ESP_ERR_* on failure

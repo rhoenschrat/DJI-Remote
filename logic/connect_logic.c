@@ -40,6 +40,7 @@
  * Protocol: DJI proprietary communication protocol
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
 #include "freertos/FreeRTOS.h"
@@ -49,6 +50,7 @@
 #include <sys/param.h>  // MIN
 #include "esp_log.h"
 
+#include "log_config.h"  // APP_LOG_TAG_BLE_DIAG
 #include "ble.h"
 #include "data.h"
 #include "enums_logic.h"
@@ -61,8 +63,10 @@
 /* Logging tag for ESP_LOG functions */
 #define TAG "LOGIC_CONNECT"
 
-/* Boot scan timeout in milliseconds */
+/* Boot scan: upper bound, and the scan time left once the first paired
+ * camera was found (a camera that is off then costs 10 s, not 30 s) */
 #define BOOT_SCAN_TIMEOUT_MS 30000
+#define BOOT_SCAN_GRACE_MS   10000
 
 /* Link-event dispatch (host task -> link_evt_task).
  * Priority 3: above main/notify (1), below LVGL port (4) and GPS (5). */
@@ -77,6 +81,9 @@
 #define LIVENESS_TEARDOWN_MS      15000
 #define LINK_EVT_POLL_MS          500
 #define TEARDOWN_POLL_MS          100
+
+/* Per-slot diagnostics line (tag APP_LOG_TAG_BLE_DIAG, DEBUG) */
+#define BLE_DIAG_INTERVAL_MS      10000
 
 /* Handshake: wait for the camera's acknowledgement of our 0x00/0x19
  * request (and for its fallback command frame) */
@@ -93,6 +100,8 @@ static atomic_uint   s_link_evt_dropped = 0;
  */
 static bool s_boot_scan_active = false;
 static uint32_t s_boot_scan_start_tick = 0;
+static uint32_t s_boot_scan_first_found_ms = 0;  /* main loop only */
+static bool s_boot_scan_any_found = false;        /* main loop only */
 static bool s_boot_scan_slot_pending[3] = {false, false, false};
 static bool s_boot_scan_slot_found[3] = {false, false, false};
 static bool s_boot_scan_slot_not_found[3] = {false, false, false};  // Track cameras not found during boot scan
@@ -328,9 +337,80 @@ static void liveness_check_slot(int slot, uint32_t now_ms) {
     }
 }
 
+static const char *diag_state_name(camera_connection_state_t st) {
+    switch (st) {
+        case CAM_STATE_UNPAIRED:            return "UNPAIRED";
+        case CAM_STATE_PAIRED_DISCONNECTED: return "DISC";
+        case CAM_STATE_CONNECTING:          return "CONNECTING";
+        case CAM_STATE_CONNECTED:           return "CONN";
+        case CAM_STATE_UNRESPONSIVE:        return "UNRESP";
+        default:                            return "?";
+    }
+}
+
+/* Formats a millisecond age, or "-" if unknown */
+static const char *diag_age(char *buf, size_t len, bool known, uint32_t ms) {
+    if (!known) {
+        return "-";
+    }
+    snprintf(buf, len, "%lums", (unsigned long)ms);
+    return buf;
+}
+
+/**
+ * @brief One BLE_DIAG line per paired slot (link_evt_task, every
+ *        BLE_DIAG_INTERVAL_MS)
+ *
+ * Reads counters only; never blocks. Nothing is gathered unless the
+ * diagnostics tag is at DEBUG (APP_BLE_DIAG_LOG=1).
+ */
+static void ble_diag_log_all(uint32_t now_ms) {
+    if (esp_log_level_get(APP_LOG_TAG_BLE_DIAG) < ESP_LOG_DEBUG) {
+        return;
+    }
+
+    for (int slot = 0; slot < NUM_CAMERAS; slot++) {
+        const camera_state_t *cam = &g_camera_states[slot];
+        if (!cam->is_paired) {
+            continue;
+        }
+
+        ble_slot_diag_t diag;
+        if (ble_get_slot_diag(slot, &diag) != ESP_OK) {
+            continue;
+        }
+
+        uint32_t push_ts = cam->last_status_timestamp;
+        char rx_buf[16], push_buf[16], disc_buf[8];
+        const char *rx = diag_age(rx_buf, sizeof(rx_buf),
+                                  diag.rx_age_ms != UINT32_MAX, diag.rx_age_ms);
+        const char *push = diag_age(push_buf, sizeof(push_buf),
+                                    push_ts != 0, now_ms - push_ts);
+        const char *disc = "-";
+        if (diag.last_disc_reason >= 0) {
+            snprintf(disc_buf, sizeof(disc_buf), "0x%02x", diag.last_disc_reason & 0xFF);
+            disc = disc_buf;
+        }
+
+        ESP_LOGD(APP_LOG_TAG_BLE_DIAG,
+                 "cam%d st=%s%s link=%d rx=%s push=%s sto=%lums drops=%u gatt_fail=%lu last_disc=%s",
+                 slot, diag_state_name(cam->connection_state),
+                 cam->is_sleeping ? "/SLEEP" : "",
+                 diag.link_up ? 1 : 0, rx, push,
+                 (unsigned long)diag.supervision_ms, data_get_notify_drops(slot),
+                 (unsigned long)diag.gatt_failures, disc);
+    }
+
+#if APP_BLE_DIAG_LOG
+    ESP_LOGD(APP_LOG_TAG_BLE_DIAG, "link_evt stack high-water mark: %u bytes",
+             (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+#endif
+}
+
 static void link_evt_task(void *arg) {
     ble_link_event_t evt;
     TickType_t last_check = xTaskGetTickCount();
+    TickType_t last_diag = last_check;
     for (;;) {
         if (xQueueReceive(s_link_evt_queue, &evt, pdMS_TO_TICKS(LINK_EVT_POLL_MS)) == pdTRUE) {
             connect_logic_handle_link_lost(evt.slot, evt.reason, evt.silent_ms);
@@ -344,6 +424,11 @@ static void link_evt_task(void *arg) {
             for (int slot = 0; slot < NUM_CAMERAS; slot++) {
                 liveness_check_slot(slot, now_ms);
             }
+        }
+
+        if ((TickType_t)(now - last_diag) >= pdMS_TO_TICKS(BLE_DIAG_INTERVAL_MS)) {
+            last_diag = now;
+            ble_diag_log_all(liveness_now_ms());
         }
     }
 }
@@ -611,8 +696,32 @@ int connect_logic_ble_disconnect(int camera_index) {
     return 0;
 }
 
+/* Remaining time until the controller must have released the link; see
+ * connect_logic.h. Read before the disconnect clears the profile. */
+static uint32_t link_release_wait_ms(int slot) {
+    ble_slot_diag_t diag;
+    uint32_t sto_ms = (uint32_t)BLE_SUPERVISION_TIMEOUT_FLOOR * 10;
+    uint32_t remaining = sto_ms;
+
+    if (ble_get_slot_diag(slot, &diag) == ESP_OK) {
+        if (diag.supervision_ms > 0) {
+            sto_ms = diag.supervision_ms;
+        }
+        if (diag.rx_age_ms == UINT32_MAX) {
+            remaining = sto_ms;
+        } else {
+            remaining = (sto_ms > diag.rx_age_ms) ? sto_ms - diag.rx_age_ms : 0;
+        }
+    }
+
+    uint32_t wait = remaining + LINK_RELEASE_MARGIN_MS;
+    if (wait < LINK_RELEASE_WAIT_MIN_MS) wait = LINK_RELEASE_WAIT_MIN_MS;
+    if (wait > LINK_RELEASE_WAIT_MAX_MS) wait = LINK_RELEASE_WAIT_MAX_MS;
+    return wait;
+}
+
 /* See connect_logic.h: why the UI must wait for the link to be released */
-int connect_logic_teardown_and_wait(int slot, uint32_t timeout_ms) {
+int connect_logic_teardown_and_wait(int slot) {
     if (!slot_valid(slot)) {
         return -1;
     }
@@ -620,6 +729,10 @@ int connect_logic_teardown_and_wait(int slot, uint32_t timeout_ms) {
     /* Keeps the watchdog off the slot and turns a late link event of an
      * already terminated link into "drop during connect flow" */
     s_slot_is_connecting[slot] = true;
+
+    uint32_t timeout_ms = link_release_wait_ms(slot);
+    ESP_LOGI(TAG, "Camera %d: teardown, waiting up to %lu ms for link release",
+             slot, (unsigned long)timeout_ms);
 
     connect_logic_ble_disconnect(slot);
 
@@ -914,6 +1027,8 @@ static bool connect_logic_has_any_paired_slot(void) {
 static void connect_logic_reset_boot_scan_state(void) {
     s_boot_scan_active = false;
     s_boot_scan_start_tick = 0;
+    s_boot_scan_first_found_ms = 0;
+    s_boot_scan_any_found = false;
     s_boot_connect_in_progress = false;
     for (int i = 0; i < 3; i++) {
         s_boot_scan_slot_pending[i] = false;
@@ -1087,19 +1202,40 @@ int connect_logic_update_boot_scan(void) {
     
     // Check if timeout expired
     bool timeout_expired = (elapsed_ms >= BOOT_SCAN_TIMEOUT_MS);
+
+    // Grace window: detected here (main loop) rather than in
+    // connect_logic_mark_slot_found(), which runs on the NimBLE host task
+    if (!s_boot_scan_any_found) {
+        for (int i = 0; i < 3; i++) {
+            if (s_boot_scan_slot_found[i]) {
+                s_boot_scan_any_found = true;
+                s_boot_scan_first_found_ms = current_tick;
+                break;
+            }
+        }
+    }
+    bool grace_expired = s_boot_scan_any_found &&
+                         (uint32_t)(current_tick - s_boot_scan_first_found_ms) >= BOOT_SCAN_GRACE_MS;
     
     // Check if scan is still running
     bool scan_still_running = ble_is_scanning();
     
-    // If all found or timeout expired, stop the scan
-    if ((all_found || timeout_expired) && scan_still_running) {
-        ESP_LOGI(TAG, "Boot scan stopping: all_found=%d, timeout=%d, elapsed=%lu ms", 
-                 all_found, timeout_expired, elapsed_ms);
+    // If all found, timeout or grace window expired, stop the scan
+    if ((all_found || timeout_expired || grace_expired) && scan_still_running) {
+        ESP_LOGI(TAG, "Boot scan stopping: all_found=%d, timeout=%d, grace=%d, elapsed=%lu ms", 
+                 all_found, timeout_expired, grace_expired, elapsed_ms);
+        if (grace_expired && !all_found && !timeout_expired) {
+            int missing = 0;
+            for (int i = 0; i < 3; i++) {
+                if (s_boot_scan_slot_pending[i]) missing++;
+            }
+            ESP_LOGI(TAG, "Boot scan: grace window expired, %d slot(s) still missing", missing);
+        }
         ble_stop_scan();
     }
     
     // If scan has stopped (either by us or by BLE layer), process results
-    if (!scan_still_running || (!all_found && timeout_expired)) {
+    if (!scan_still_running || (!all_found && (timeout_expired || grace_expired))) {
         // Scan is complete - process results
         s_boot_scan_active = false;
         

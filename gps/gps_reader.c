@@ -2,11 +2,11 @@
  * DJI Camera Remote Control - GPS Reader Module
  * 
  * This file implements GPS communication and NMEA parsing for the M5Stack Module GPS v2.0.
- * It reads GPS data from UART2, parses NMEA sentences (GPGGA, GPRMC, GPGSA), and provides
+ * It reads GPS data from a UART (CONFIG_GPS_UART_*), parses NMEA sentences (GPGGA, GPRMC, GPGSA), and provides
  * thread-safe access to GPS data including position, velocity, accuracy, and fix status.
  * 
  * Key features:
- * - UART2 communication with configurable baud rate
+ * - UART communication; port, pins and baud rate per board (Kconfig)
  * - NMEA sentence parsing (GPGGA, GPRMC, GPGSA)
  * - Thread-safe GPS data access via mutex
  * - GPS data age tracking
@@ -186,8 +186,8 @@ static void gps_task(void *pvParameters) {
             
             /* Log UART activity periodically (every 5 seconds) */
             if (current_time - last_uart_activity_log > 5000) {
-                ESP_LOGI(TAG, "UART2 receiving data: %d bytes in last period (total: %lu bytes)", 
-                         len, (unsigned long)total_bytes_received);
+                ESP_LOGD(TAG, "UART%d receiving data: %d bytes in last read (total: %lu bytes)",
+                         GPS_UART_NUM, len, (unsigned long)total_bytes_received);
                 last_uart_activity_log = current_time;
                 
                 /* Check if data looks like valid NMEA (contains $ or valid NMEA characters) */
@@ -225,7 +225,7 @@ static void gps_task(void *pvParameters) {
                     }
                 }
                 hex_buffer[hex_pos] = '\0';
-                ESP_LOGI(TAG, "Raw UART data (first %d bytes): %s", log_len, hex_buffer);
+                ESP_LOGD(TAG, "Raw UART data (first %d bytes): %s", log_len, hex_buffer);
 #endif
             }
             
@@ -298,13 +298,14 @@ static void gps_task(void *pvParameters) {
                     uart_get_buffered_data_len(GPS_UART_NUM, &buffered_size);
                     
                     if (buffered_size > 0) {
-                        ESP_LOGW(TAG, "UART2: %zu bytes buffered but not read. Possible buffer overflow or reading issue.", buffered_size);
+                        ESP_LOGW(TAG, "UART%d: %zu bytes buffered but not read. Possible buffer overflow or reading issue.",
+                                 GPS_UART_NUM, buffered_size);
                     } else {
-                        ESP_LOGW(TAG, "UART2: No data received. Check GPS module:");
+                        ESP_LOGW(TAG, "UART%d: No data received. Check GPS module:", GPS_UART_NUM);
                         ESP_LOGW(TAG, "  1. Module is connected to M-Bus connector");
                         ESP_LOGW(TAG, "  2. Module is powered (LED should be on)");
                         ESP_LOGW(TAG, "  3. DIP switch matches baud rate (current: %d)", GPS_UART_BAUD_RATE);
-                        ESP_LOGW(TAG, "  4. Pins: TX=GPIO17, RX=GPIO16");
+                        ESP_LOGW(TAG, "  4. Pins: TX=GPIO%d, RX=GPIO%d", GPS_UART_TX_PIN, GPS_UART_RX_PIN);
                         ESP_LOGW(TAG, "  5. Try 115200 baud if 9600 doesn't work");
                     }
                 }
@@ -748,7 +749,7 @@ static void gps_debug_task(void *pvParameters) {
         stack_check_counter++;
         if (stack_check_counter >= STACK_CHECK_INTERVAL) {
             UBaseType_t stack_remaining = uxTaskGetStackHighWaterMark(NULL);
-            ESP_LOGI(TAG, "GPS debug task stack high-watermark: %u bytes remaining", 
+            ESP_LOGD(TAG, "GPS debug task stack high-watermark: %u bytes remaining", 
                      stack_remaining * sizeof(StackType_t));
             stack_check_counter = 0;
         }
@@ -759,7 +760,7 @@ static void gps_debug_task(void *pvParameters) {
             
             if (age_ms < 10000) {  /* Data received within last 10 seconds */
                 /* Simplified output: single line with essential info */
-                ESP_LOGI(TAG, "GPS: Fix=%s, Lat=%.6f, Lon=%.6f, Alt=%.1fm, Sats=%d/%d, HDOP=%.1f",
+                ESP_LOGD(TAG, "GPS: Fix=%s, Lat=%.6f, Lon=%.6f, Alt=%.1fm, Sats=%d/%d, HDOP=%.1f",
                          gps_data.has_fix ? "YES" : "NO",
                          gps_data.latitude,
                          gps_data.longitude,

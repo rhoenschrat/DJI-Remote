@@ -26,4 +26,8 @@ void data_register_new_status_update_callback(new_camera_status_update_cb_t call
 
 void receive_camera_notify_handler(int camera_index, const uint8_t *raw_data, size_t raw_data_length);
 
+/* Notifications dropped for a slot (queue full or malloc failure),
+ * cumulative since boot; 0 for an invalid slot */
+unsigned int data_get_notify_drops(int slot);
+
 #endif
