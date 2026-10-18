@@ -26,6 +26,7 @@
 
 #include "connect_logic.h"
 #include "light_logic.h"
+#include "diag.h"
 #include "sdkconfig.h"
 
 /* Board HAL selection — driven by Kconfig (main/Kconfig.projbuild) */
@@ -95,6 +96,10 @@ void app_main(void) {
      * Configure global log level before any subsystems start logging
      */
     app_log_set_level(APP_DEFAULT_LOG_LEVEL);
+
+    /* Persistent fault diagnostics (ADR-022). Before HAL_INIT so a restart is
+     * recorded even if a later init step fails; uses its own NVS partition. */
+    diag_init();
 
     /* 
      * HARDWARE INITIALIZATION PHASE

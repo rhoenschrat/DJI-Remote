@@ -317,6 +317,66 @@ static void gps_task(void *pvParameters) {
     }
 }
 
+#define RMC_MAX_FIELDS 13
+#define RMC_FIELD_LEN  16
+
+/* Splits an NMEA sentence at commas into fixed-size fields ('$' and the
+ * '*checksum' are dropped). Returns the number of fields. */
+static int split_nmea_fields(const char *sentence, char fields[][RMC_FIELD_LEN], int max_fields) {
+    int field = 0;
+    int idx = 0;
+    for (const char *p = sentence; *p && *p != '*' && field < max_fields; p++) {
+        if (*p == ',') {
+            fields[field][idx] = '\0';
+            field++;
+            idx = 0;
+        } else if (*p != '$' && idx < RMC_FIELD_LEN - 1) {
+            fields[field][idx++] = *p;
+        }
+    }
+    if (field < max_fields) {
+        fields[field][idx] = '\0';
+        field++;
+    }
+    return field;
+}
+
+/* Days since 1970-01-01 for a proleptic Gregorian date (H. Hinnant's
+ * days_from_civil); avoids mktime() and time zones */
+static int32_t days_from_civil(int y, unsigned m, unsigned d) {
+    y -= (m <= 2);
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (int32_t)doe - 719468;
+}
+
+static bool two_digits(const char *s, int *out) {
+    if (s[0] < '0' || s[0] > '9' || s[1] < '0' || s[1] > '9') {
+        return false;
+    }
+    *out = (s[0] - '0') * 10 + (s[1] - '0');
+    return true;
+}
+
+/* hhmmss[.sss] + ddmmyy -> UTC epoch seconds; false if missing or out of range */
+static bool nmea_utc_to_epoch(const char *time_str, const char *date_str, uint32_t *epoch) {
+    int hh, mi, ss, dd, mo, yy;
+    if (strlen(time_str) < 6 || strlen(date_str) < 6 ||
+        !two_digits(time_str, &hh) || !two_digits(time_str + 2, &mi) ||
+        !two_digits(time_str + 4, &ss) || !two_digits(date_str, &dd) ||
+        !two_digits(date_str + 2, &mo) || !two_digits(date_str + 4, &yy)) {
+        return false;
+    }
+    if (hh > 23 || mi > 59 || ss > 60 || dd < 1 || dd > 31 || mo < 1 || mo > 12) {
+        return false;
+    }
+    int32_t days = days_from_civil(2000 + yy, (unsigned)mo, (unsigned)dd);
+    *epoch = (uint32_t)days * 86400u + (uint32_t)(hh * 3600 + mi * 60 + ss);
+    return true;
+}
+
 /**
  * @brief Parse NMEA sentence
  * 
@@ -445,28 +505,40 @@ static bool parse_gpgga_sentence(const char *sentence) {
  * @return true if sentence was successfully parsed
  */
 static bool parse_gprmc_sentence(const char *sentence) {
-    float speed_knots, course;
-    char status;
-
-    /* Example: $GPRMC,123519,A,4807.038,N,01131.000,E,022.4,084.4,230394,003.1,W*6A */
-    int parsed = sscanf(sentence, "$GPRMC,%*f,%c,%*f,%*c,%*f,%*c,%f,%f,%*f,%*f,%*c",
-                       &status, &speed_knots, &course);
-
-    if (parsed >= 3 && status == 'A') {  /* 'A' = valid fix */
-        /* Convert speed from knots to m/s */
-        float speed_ms = speed_knots * 0.514444f;
-
-        /* Update GPS data with mutex protection */
-        if (xSemaphoreTake(g_gps_mutex, portMAX_DELAY) == pdTRUE) {
-            g_gps_data.speed = speed_ms;
-            g_gps_data.course = course;
-            xSemaphoreGive(g_gps_mutex);
-        }
-
-        return true;
+    /* Fields: 0=$xxRMC, 1=hhmmss.sss, 2=status (A/V), 3/4=lat, 5/6=lon,
+     * 7=speed (knots), 8=course, 9=ddmmyy, 10/11=magnetic variation.
+     * Split by commas: empty fields are common without a fix, and sscanf
+     * stops at them. Works for $GPRMC and $GNRMC alike. */
+    char fields[RMC_MAX_FIELDS][RMC_FIELD_LEN] = {{0}};
+    int n = split_nmea_fields(sentence, fields, RMC_MAX_FIELDS);
+    if (n < 10) {
+        return false;
     }
-    
-    return false;
+
+    bool status_valid = (fields[2][0] == 'A');
+    uint32_t epoch = 0;
+    bool utc_ok = status_valid && nmea_utc_to_epoch(fields[1], fields[9], &epoch);
+    bool speed_ok = status_valid && fields[7][0] != '\0' && fields[8][0] != '\0';
+
+    if (!utc_ok && !speed_ok) {
+        return false;
+    }
+
+    if (xSemaphoreTake(g_gps_mutex, portMAX_DELAY) == pdTRUE) {
+        if (speed_ok) {
+            /* Convert speed from knots to m/s */
+            g_gps_data.speed = strtof(fields[7], NULL) * 0.514444f;
+            g_gps_data.course = strtof(fields[8], NULL);
+        }
+        if (utc_ok) {
+            g_gps_data.utc_valid = true;
+            g_gps_data.utc_epoch = epoch;
+            g_gps_data.utc_timestamp_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        }
+        xSemaphoreGive(g_gps_mutex);
+    }
+
+    return true;
 }
 
 /**
@@ -813,6 +885,29 @@ uint32_t gps_get_last_update_age_ms(void) {
     }
     
     return age_ms;
+}
+
+/**
+ * @brief Current UTC time from GPS (see gps_reader.h)
+ */
+bool gps_get_utc_epoch(uint32_t *epoch, uint32_t max_age_ms) {
+    if (epoch == NULL || g_gps_mutex == NULL || !g_gps_initialized) {
+        return false;
+    }
+
+    bool ok = false;
+    if (xSemaphoreTake(g_gps_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        uint32_t fix_age = now - g_gps_data.timestamp;
+        uint32_t utc_age = now - g_gps_data.utc_timestamp_ms;
+        if (g_gps_data.has_fix && g_gps_data.utc_valid &&
+            fix_age < max_age_ms && utc_age < max_age_ms) {
+            *epoch = g_gps_data.utc_epoch + utc_age / 1000;
+            ok = true;
+        }
+        xSemaphoreGive(g_gps_mutex);
+    }
+    return ok;
 }
 
 /**

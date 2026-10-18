@@ -58,6 +58,7 @@
 #include "command_logic.h"
 #include "status_logic.h"
 #include "dji_protocol_data_structures.h"
+#include "diag.h"
 #include "../main/ui.h"  // For camera_state_t and g_camera_states
 
 /* Logging tag for ESP_LOG functions */
@@ -84,6 +85,12 @@
 
 /* Per-slot diagnostics line (tag APP_LOG_TAG_BLE_DIAG, DEBUG) */
 #define BLE_DIAG_INTERVAL_MS      10000
+
+/* Debug-only fault storm for the persistent diagnostics (ADR-022, plan 0013
+ * scenario 8): 1 = once per boot, 30 s after start, record 200 DISCONNECT
+ * events for slot 0 within ~2 s on link_evt_task. Must stay 0 in committed
+ * code. */
+#define DIAG_DEBUG_STORM          0
 
 /* Handshake: wait for the camera's acknowledgement of our 0x00/0x19
  * request (and for its fallback command frame) */
@@ -142,6 +149,10 @@ static atomic_bool s_link_lost_pending[NUM_CAMERAS];
 static volatile uint32_t s_liveness_armed_ms[NUM_CAMERAS];
 static atomic_bool s_teardown_requested[NUM_CAMERAS];
 static bool s_last_seen_sleeping[NUM_CAMERAS];
+/* Silence at the latest watchdog tick while UNRESPONSIVE; reported as the
+ * RECOVERED detail (up to one tick, 500 ms, older than the recovery).
+ * link_evt_task only. */
+static uint32_t s_unresponsive_silence_ms[NUM_CAMERAS];
 static portMUX_TYPE s_slot_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* Same time base as status_logic's last_status_timestamp */
@@ -226,6 +237,8 @@ void connect_logic_handle_link_lost(int slot, int reason, uint32_t silent_ms) {
     if (s_slot_is_connecting[slot]) {
         ESP_LOGI(TAG, "Camera %d: drop during connect flow (reason=0x%x), flow handles cleanup",
                  slot, reason);
+        diag_record(DIAG_EVT_CONNECT_ABORT, slot, g_camera_states[slot].device_id,
+                    (uint16_t)reason);
         return;
     }
 
@@ -235,6 +248,13 @@ void connect_logic_handle_link_lost(int slot, int reason, uint32_t silent_ms) {
 
     ESP_LOGW(TAG, "Camera %d link lost (reason=0x%x, silent=%lu ms)",
              slot, reason, (unsigned long)silent_ms);
+
+    /* After a watchdog teardown only TEARDOWN is recorded (ADR-022); the
+     * flag is cleared by the reset below, so read it first */
+    if (!atomic_load(&s_teardown_requested[slot])) {
+        diag_record(DIAG_EVT_DISCONNECT, slot, g_camera_states[slot].device_id,
+                    (uint16_t)reason);
+    }
 
     connect_logic_reset_slot_link_state(slot);
     atomic_store(&s_link_lost_pending[slot], true);
@@ -265,6 +285,8 @@ static void connect_logic_terminate_unresponsive(int slot, uint32_t silence_ms) 
     atomic_store(&s_teardown_requested[slot], true);
     ESP_LOGW(TAG, "Camera %d: no status push for %lu ms, terminating link",
              slot, (unsigned long)silence_ms);
+    diag_record(DIAG_EVT_TEARDOWN, slot, g_camera_states[slot].device_id,
+                diag_silence_units(silence_ms));
     ble_disconnect(slot);
 }
 
@@ -318,6 +340,8 @@ static void liveness_check_slot(int slot, uint32_t now_ms) {
             liveness_try_transition(slot, CAM_STATE_CONNECTED, CAM_STATE_UNRESPONSIVE)) {
             ESP_LOGW(TAG, "Camera %d: unresponsive (no status push for %lu ms)",
                      slot, (unsigned long)silence);
+            s_unresponsive_silence_ms[slot] = silence;
+            diag_record(DIAG_EVT_UNRESPONSIVE, slot, cam->device_id, diag_silence_units(silence));
             g_ui_state.display_needs_update = true;
         }
         return;
@@ -327,10 +351,13 @@ static void liveness_check_slot(int slot, uint32_t now_ms) {
     if (silence < LIVENESS_UNRESPONSIVE_MS) {
         if (liveness_try_transition(slot, CAM_STATE_UNRESPONSIVE, CAM_STATE_CONNECTED)) {
             ESP_LOGI(TAG, "Camera %d: responsive again", slot);
+            diag_record(DIAG_EVT_RECOVERED, slot, cam->device_id,
+                        diag_silence_units(s_unresponsive_silence_ms[slot]));
             g_ui_state.display_needs_update = true;
         }
         return;
     }
+    s_unresponsive_silence_ms[slot] = silence;
 
     if (silence >= LIVENESS_TEARDOWN_MS && !atomic_load(&s_teardown_requested[slot])) {
         connect_logic_terminate_unresponsive(slot, silence);
@@ -407,11 +434,28 @@ static void ble_diag_log_all(uint32_t now_ms) {
 #endif
 }
 
+#if DIAG_DEBUG_STORM
+static void diag_debug_storm(void) {
+    static bool s_done = false;
+    if (s_done || liveness_now_ms() < 30000) return;
+    s_done = true;
+    ESP_LOGW(TAG, "DEBUG: diag fault storm, 200 events");
+    for (int i = 0; i < 200; i++) {
+        diag_record(DIAG_EVT_DISCONNECT, 0, g_camera_states[0].device_id, 0x2FF);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    ESP_LOGW(TAG, "DEBUG: diag fault storm done");
+}
+#endif
+
 static void link_evt_task(void *arg) {
     ble_link_event_t evt;
     TickType_t last_check = xTaskGetTickCount();
     TickType_t last_diag = last_check;
     for (;;) {
+#if DIAG_DEBUG_STORM
+        diag_debug_storm();
+#endif
         if (xQueueReceive(s_link_evt_queue, &evt, pdMS_TO_TICKS(LINK_EVT_POLL_MS)) == pdTRUE) {
             connect_logic_handle_link_lost(evt.slot, evt.reason, evt.silent_ms);
         }

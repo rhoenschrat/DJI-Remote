@@ -43,6 +43,9 @@ typedef struct {
     float pdop;             /* Position DOP (from GPGSA, 0.0 if unavailable) */
     uint8_t satellites_used; /* Number of satellites used for fix (from GPGSA, 0 if unavailable) */
     uint8_t fix_type;       /* Fix type: 0=No Fix, 1=2D, 2=3D (from GPGSA or inferred) */
+    bool utc_valid;          /* True if utc_epoch came from a valid RMC sentence (status A) */
+    uint32_t utc_epoch;      /* UTC time of the last valid RMC sentence, seconds since 1970 */
+    uint32_t utc_timestamp_ms; /* Uptime (ms) at which utc_epoch was parsed */
 } gps_data_t;
 
 /* GPS Module Configuration — values set via Kconfig (see main/Kconfig.projbuild) */
@@ -157,6 +160,19 @@ const char* gps_get_fix_type_string(uint8_t fix_type);
  * @return Milliseconds since last GPS data update, or UINT32_MAX if no data received
  */
 uint32_t gps_get_last_update_age_ms(void);
+
+/**
+ * @brief Current UTC time from GPS (seconds since 1970-01-01)
+ *
+ * Returns the time of the last valid RMC sentence plus the uptime elapsed
+ * since it was parsed. Takes the GPS mutex (up to 100 ms); never call from a
+ * task that must not block on it.
+ *
+ * @param epoch      Output: current UTC epoch seconds
+ * @param max_age_ms Only succeed if the fix and the RMC time are newer than this
+ * @return true if a fix with a valid UTC time is available
+ */
+bool gps_get_utc_epoch(uint32_t *epoch, uint32_t max_age_ms);
 
 /**
  * @brief Test GPS communication at current baud rate

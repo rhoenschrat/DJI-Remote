@@ -4,3 +4,7 @@
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
 factory,  app,  factory, 0x10000,  0x200000,
+# Persistent fault diagnostics (ADR-022): own NVS partition, read and erased
+# by tools/diag/dji_diag. Placed 1 MB above the app end so
+# the factory partition can grow to 3 MB without moving it.
+diag,     data, nvs,     0x310000, 0x6000,

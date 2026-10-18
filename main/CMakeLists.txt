@@ -24,6 +24,7 @@ set(SRCS "app_main.c"
          "splash_logo.c"
          "ui_screen_splash.c"
          "../gps/gps_reader.c"
+         "../diag/diag.c"
          "../log_config.c")
 
 # Board-specific HAL source — only the active HAL is compiled
@@ -34,8 +35,8 @@ elseif(CONFIG_BOARD_WAVESHARE_S3_LCD19)
 endif()
 
 idf_component_register(SRCS ${SRCS}
-                    PRIV_REQUIRES bt nvs_flash esp_driver_gpio led_strip esp_driver_spi esp_lcd driver esp_lvgl_port
-                    INCLUDE_DIRS "." "../utils/crc" "../protocol" "../ble" "../data" "../logic" "../gps" "../")
+                    PRIV_REQUIRES bt nvs_flash esp_app_format esp_driver_gpio led_strip esp_driver_spi esp_lcd driver esp_lvgl_port
+                    INCLUDE_DIRS "." "../utils/crc" "../protocol" "../ble" "../data" "../logic" "../gps" "../diag" "../")
 
 # Board compile-time define — driven by Kconfig
 if(CONFIG_BOARD_M5STACK_BASIC_V27)

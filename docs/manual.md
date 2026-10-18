@@ -221,3 +221,25 @@ For each connected *and awake* camera, the remote sends:
 Transmission is continuous (≈10 Hz).
 
 If a camera sleeps, GPS transmission pauses automatically and resumes when it wakes.
+
+
+# 5. Fault Diagnostics
+
+The remote keeps a small record of connection problems and restarts, even
+without a computer attached. After a tour you can read it over USB to see
+what happened, when, and with which camera:
+
+- restarts of the remote (with the reason, e.g. power-on or crash)
+- cameras that lost their connection unexpectedly
+- cameras that stopped responding, recovered, or were disconnected by the
+  remote
+- connections that dropped while connecting
+
+If the GPS had a fix, each entry also has the date and time.
+
+To read the record, connect the remote by USB and run
+`tools/diag/dji_diag read -p <port>` from the firmware repository (see
+[`tools/diag/README.md`](../tools/diag/README.md)). Reading restarts the
+remote. Your pairings are not affected, and updating the firmware keeps the
+record.
+
