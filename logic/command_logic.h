@@ -46,6 +46,5 @@ bool command_logic_slot_is_connected(int slot_index);
 bool command_logic_slot_is_awake(int slot_index);
 bool command_logic_slot_is_recording(int slot_index);
 esp_err_t command_logic_send_highlight_for_slot(int slot_index);
-esp_err_t command_logic_send_highlight_for_all_active(void);
 
 #endif

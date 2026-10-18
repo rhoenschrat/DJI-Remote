@@ -105,6 +105,9 @@ ble/
 gps/
  └── gps_reader.c/.h               → GPS UART reader, NMEA parser, GPS push
 
+diag/
+ └── diag.c/.h                     → Persistent fault diagnostics (NVS ring in partition "diag")
+
 data/
  └── data.c/.h                     → BLE notification dispatcher task
 
@@ -310,6 +313,7 @@ and controls the video mode text rendering path.
 | Notification processing (`data.c`) | BLE notification parsing and routing | 4096 bytes |
 | GPS reader (`gps_reader.c`) | UART NMEA parsing, GPS push | 4096 bytes |
 | NimBLE host (`ble.c`) | GATT client event handling | NimBLE default |
+| Diagnostics writer (`diag.c`, prio 1) | Writes fault records to the `diag` NVS partition | 3072 bytes |
 | FreeRTOS Timer Service | LED timer callbacks, NVS cleanup | 4096 bytes |
 
 The FreeRTOS Timer Service task stack is set to 4096 bytes in
@@ -352,7 +356,38 @@ Battery and SD card icons follow threshold-based color logic.
 
 ---
 
-# 12. Logging
+# 12. Fault Diagnostics
+
+The remote records connection faults and restarts in its own NVS partition
+`diag` (0x310000, 24 KB), independent of the log level, so they can be read
+after a tour.
+
+| Event | Recorded when | Detail |
+|-------|---------------|--------|
+| `RESTART` | Every boot | Reset reason |
+| `DISCONNECT` | Unexpected link loss (not user-initiated, not during a connect, not after a teardown) | BLE reason |
+| `UNRESPONSIVE` | No status push for 6 s (link still up) | Silence |
+| `RECOVERED` | Status push returned before the teardown | Silence |
+| `TEARDOWN` | Link closed after 15 s without status push | Silence |
+| `CONNECT_ABORT` | Link dropped during a connect | BLE reason |
+
+- `diag_record()` never blocks: it increments a counter and queues the
+  record. A low-priority `diag` task writes it.
+- Ring of 128 records (24 bytes each, slot = `seq % 128`) plus a `meta` blob
+  with boot counter and per-slot counters. Writes are limited by a token
+  bucket (burst 10, then one per 30 s); events over the limit are only
+  counted.
+- Records carry the GPS UTC time when a fix is available (parsed from
+  `$GPRMC`/`$GNRMC`).
+- There is no read-out code in the firmware. `tools/diag/dji_diag` reads and
+  erases the partition with esptool and decodes it on the computer; see
+  [`tools/diag/README.md`](../tools/diag/README.md).
+- Event types are append-only; the record layout is mirrored in the tool and
+  checked with `tools/diag/dji_diag selftest`.
+
+---
+
+# 13. Logging
 
 - All logs use `ESP_LOG*` macros
 - Default log level set at build time via `APP_DEFAULT_LOG_LEVEL` in `log_config.h`
@@ -360,7 +395,7 @@ Battery and SD card icons follow threshold-based color logic.
 
 ---
 
-# 13. Developer Notes
+# 14. Developer Notes
 
 - All LVGL calls outside the LVGL task must be wrapped in `lvgl_port_lock(0)` / `lvgl_port_unlock()`
 - Capture `g_camera_states[]` to local variables before updating widgets (TOCTOU prevention)

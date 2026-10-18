@@ -48,7 +48,7 @@ uint8_t* camera_mode_switch_creator(const void *structure, size_t *data_length, 
 
         *data_length = sizeof(camera_mode_switch_command_frame_t);
         
-        ESP_LOGI(TAG, "Data length calculated for camera_mode_switch_command_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for camera_mode_switch_command_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -56,7 +56,7 @@ uint8_t* camera_mode_switch_creator(const void *structure, size_t *data_length, 
             return NULL;
         }
 
-        ESP_LOGI(TAG, "Memory allocation succeeded for command frame, copying data...");
+        ESP_LOGD(TAG, "Memory allocation succeeded for command frame, copying data...");
         
         memcpy(data, command_frame, *data_length);
     } else {
@@ -74,7 +74,7 @@ int camera_mode_switch_parser(const uint8_t *data, size_t data_length, void *str
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Camera Mode Switch data, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Camera Mode Switch data, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         // Command frame parsing for this functionality is not yet supported.
@@ -94,7 +94,7 @@ int camera_mode_switch_parser(const uint8_t *data, size_t data_length, void *str
     output_response->ret_code = response->ret_code;
     memcpy(output_response->reserved, response->reserved, sizeof(response->reserved));
 
-    ESP_LOGI(TAG, "Camera Mode Switch Response parsed successfully. ret_code: %u", output_response->ret_code);
+    ESP_LOGD(TAG, "Camera Mode Switch Response parsed successfully. ret_code: %u", output_response->ret_code);
 
     return 0;
 }
@@ -105,7 +105,7 @@ int version_query_parser(const uint8_t *data, size_t data_length, void *structur
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Version Query Response, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Version Query Response, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         ESP_LOGE(TAG, "version_query_parser: Only response frames are supported");
@@ -153,7 +153,7 @@ uint8_t* record_control_creator(const void *structure, size_t *data_length, uint
 
         *data_length = sizeof(record_control_command_frame_t);
         
-        ESP_LOGI(TAG, "Data length calculated for record_control_command_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for record_control_command_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -161,7 +161,7 @@ uint8_t* record_control_creator(const void *structure, size_t *data_length, uint
             return NULL;
         }
 
-        ESP_LOGI(TAG, "Memory allocation succeeded for command frame, copying data...");
+        ESP_LOGD(TAG, "Memory allocation succeeded for command frame, copying data...");
         
         memcpy(data, command_frame, *data_length);
     } else {
@@ -178,7 +178,7 @@ int record_control_parser(const uint8_t *data, size_t data_length, void *structu
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Record Control Response, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Record Control Response, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         ESP_LOGW(TAG, "record_control_parser: Parsing command frame is not supported.");
@@ -196,7 +196,7 @@ int record_control_parser(const uint8_t *data, size_t data_length, void *structu
     record_control_response_frame_t *output_frame = (record_control_response_frame_t *)structure_out;
     output_frame->ret_code = response->ret_code;
 
-    ESP_LOGI(TAG, "Record Control Response parsed successfully. ret_code: %d", output_frame->ret_code);
+    ESP_LOGD(TAG, "Record Control Response parsed successfully. ret_code: %d", output_frame->ret_code);
 
     return 0;
 }
@@ -215,7 +215,7 @@ uint8_t* connection_data_creator(const void *structure, size_t *data_length, uin
 
         *data_length = sizeof(connection_request_command_frame);
 
-        ESP_LOGI(TAG, "Data length calculated for connection_request_command_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for connection_request_command_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -229,7 +229,7 @@ uint8_t* connection_data_creator(const void *structure, size_t *data_length, uin
 
         *data_length = sizeof(connection_request_response_frame);
 
-        ESP_LOGI(TAG, "Data length calculated for connection_request_response_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for connection_request_response_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -249,10 +249,10 @@ int connection_data_parser(const uint8_t *data, size_t data_length, void *struct
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Connection Request data, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Connection Request data, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
-        ESP_LOGI(TAG, "Parsing command frame...");
+        ESP_LOGD(TAG, "Parsing command frame...");
 
         if (data_length < sizeof(connection_request_command_frame)) {
             ESP_LOGE(TAG, "connection_request_data_parser: Data length too short for command frame. Expected: %zu, Got: %zu",
@@ -274,7 +274,7 @@ int connection_data_parser(const uint8_t *data, size_t data_length, void *struct
 
         return 0;
     } else {
-        ESP_LOGI(TAG, "Parsing response frame...");
+        ESP_LOGD(TAG, "Parsing response frame...");
 
         if (data_length < sizeof(connection_request_response_frame)) {
             ESP_LOGE(TAG, "connection_request_data_parser: Data length too short for response frame. Expected: %zu, Got: %zu",
@@ -307,7 +307,7 @@ uint8_t* camera_status_subscription_creator(const void *structure, size_t *data_
 
         *data_length = sizeof(camera_status_subscription_command_frame);
         
-        ESP_LOGI(TAG, "Data length calculated for camera_status_subscription_command_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for camera_status_subscription_command_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -315,7 +315,7 @@ uint8_t* camera_status_subscription_creator(const void *structure, size_t *data_
             return NULL;
         }
 
-        ESP_LOGI(TAG, "Memory allocation succeeded for command frame, copying data...");
+        ESP_LOGD(TAG, "Memory allocation succeeded for command frame, copying data...");
         
         memcpy(data, camera_command_frame, *data_length);
     } else {
@@ -331,7 +331,7 @@ int camera_status_push_data_parser(const uint8_t *data, size_t data_length, void
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Camera Status Push data, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Camera Status Push data, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         if (data_length < sizeof(camera_status_push_command_frame)) {
@@ -378,7 +378,7 @@ int new_camera_status_push_data_parser(const uint8_t *data, size_t data_length, 
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing New Camera Status Push data, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing New Camera Status Push data, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         // DJI 1D06 frame format (fixed-size fields, padded with zeros):
@@ -445,7 +445,7 @@ int new_camera_status_push_data_parser(const uint8_t *data, size_t data_length, 
         }
         output_frame->mode_param[output_frame->mode_param_length] = '\0';  // Null-terminate
 
-        ESP_LOGI(TAG, "new_camera_status_push_data_parser: Parsed mode_name='%s' (len=%d), mode_param='%s' (len=%d)",
+        ESP_LOGD(TAG, "new_camera_status_push_data_parser: Parsed mode_name='%s' (len=%d), mode_param='%s' (len=%d)",
                  output_frame->mode_name, output_frame->mode_name_length,
                  output_frame->mode_param, output_frame->mode_param_length);
 
@@ -470,7 +470,7 @@ uint8_t* key_report_creator(const void *structure, size_t *data_length, uint8_t 
 
         *data_length = sizeof(key_report_command_frame_t);
         
-        ESP_LOGI(TAG, "Data length calculated for key_report_command_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for key_report_command_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -478,7 +478,7 @@ uint8_t* key_report_creator(const void *structure, size_t *data_length, uint8_t 
             return NULL;
         }
 
-        ESP_LOGI(TAG, "Memory allocation succeeded for command frame, copying data...");
+        ESP_LOGD(TAG, "Memory allocation succeeded for command frame, copying data...");
         
         memcpy(data, command_frame, *data_length);
     } else {
@@ -495,7 +495,7 @@ int key_report_parser(const uint8_t *data, size_t data_length, void *structure_o
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Key Report Response data, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Key Report Response data, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         ESP_LOGE(TAG, "key_report_parser: Only response frames are supported");
@@ -513,7 +513,7 @@ int key_report_parser(const uint8_t *data, size_t data_length, void *structure_o
 
     output_response->ret_code = response->ret_code;
 
-    ESP_LOGI(TAG, "Key Report Response parsed successfully. ret_code: %u", output_response->ret_code);
+    ESP_LOGD(TAG, "Key Report Response parsed successfully. ret_code: %u", output_response->ret_code);
 
     return 0;
 }
@@ -533,7 +533,7 @@ uint8_t* camera_power_mode_switch_creator(const void *structure, size_t *data_le
 
         *data_length = sizeof(camera_power_mode_switch_command_frame_t);
 
-        ESP_LOGI(TAG, "Data length calculated for camera_power_mode_switch_command_frame: %zu", *data_length);
+        ESP_LOGD(TAG, "Data length calculated for camera_power_mode_switch_command_frame: %zu", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -541,7 +541,7 @@ uint8_t* camera_power_mode_switch_creator(const void *structure, size_t *data_le
             return NULL;
         }
 
-        ESP_LOGI(TAG, "Memory allocation succeeded for command frame, copying data...");
+        ESP_LOGD(TAG, "Memory allocation succeeded for command frame, copying data...");
 
         memcpy(data, command_frame, *data_length);
     } else {
@@ -559,7 +559,7 @@ int camera_power_mode_switch_parser(const uint8_t *data, size_t data_length, voi
         return -1;
     }
 
-    ESP_LOGI(TAG, "Parsing Camera Power Mode Switch data, received data length: %zu", data_length);
+    ESP_LOGD(TAG, "Parsing Camera Power Mode Switch data, received data length: %zu", data_length);
 
     if ((cmd_type & 0x20) == 0) {
         // Command frame parsing for this functionality is not yet supported.
@@ -578,7 +578,7 @@ int camera_power_mode_switch_parser(const uint8_t *data, size_t data_length, voi
 
     output_response->ret_code = response->ret_code;
 
-    ESP_LOGI(TAG, "Camera Power Mode Switch Response parsed successfully. ret_code: %u", output_response->ret_code);
+    ESP_LOGD(TAG, "Camera Power Mode Switch Response parsed successfully. ret_code: %u", output_response->ret_code);
 
     return 0;
 }
@@ -605,7 +605,7 @@ uint8_t* gps_data_push_creator(const void *structure, size_t *data_length, uint8
 
         *data_length = sizeof(gps_data_push_command_frame_t);
 
-        ESP_LOGI(TAG, "GPS data push frame created: payload_size=%zu bytes (CmdSet=0x00, CmdID=0x17)", *data_length);
+        ESP_LOGD(TAG, "GPS data push frame created: payload_size=%zu bytes (CmdSet=0x00, CmdID=0x17)", *data_length);
 
         data = (uint8_t *)malloc(*data_length);
         if (data == NULL) {
@@ -613,7 +613,7 @@ uint8_t* gps_data_push_creator(const void *structure, size_t *data_length, uint8
             return NULL;
         }
 
-        ESP_LOGI(TAG, "Memory allocation succeeded for GPS data push frame, copying data...");
+        ESP_LOGD(TAG, "Memory allocation succeeded for GPS data push frame, copying data...");
 
         memcpy(data, command_frame, *data_length);
     } else {

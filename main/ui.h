@@ -32,14 +32,6 @@ typedef enum {
     SCREEN_COUNT                // Total number of screens
 } ui_screen_t;
 
-// Wake state machine for wake-and-record functionality
-typedef enum {
-    WAKE_STATE_IDLE = 0,                // Normal operation, not waking up
-    WAKE_STATE_BROADCASTING,            // Broadcasting wake packet (2 seconds)
-    WAKE_STATE_WAITING_CONFIRMATION,    // Waiting for camera status updates
-    WAKE_STATE_READY                    // Camera confirmed awake, ready to send command
-} wake_state_t;
-
 // Multi-camera support constants
 #define NUM_CAMERAS 3
 
@@ -74,7 +66,8 @@ typedef enum {
     CAM_STATE_UNPAIRED = 0,           /* No camera paired in this slot */
     CAM_STATE_PAIRED_DISCONNECTED,    /* Camera paired but not currently connected */
     CAM_STATE_CONNECTING,             /* Currently attempting to connect */
-    CAM_STATE_CONNECTED               /* Camera connected and ready */
+    CAM_STATE_CONNECTED,              /* Camera connected and ready */
+    CAM_STATE_UNRESPONSIVE            /* Link up, handshake done, but no 1D02 push for >= 6 s (ADR-019) */
 } camera_connection_state_t;
 
 typedef struct camera_state_s {
@@ -162,17 +155,18 @@ void ui_early_init(void);
 void ui_init(void);
 void ui_auto_connect_on_startup(void);
 void ui_initiate_boot_scan_connections(void);
-int ui_attempt_background_reconnection(void);
 void ui_update_display(void);
 void ui_execute_main_screen_action(void);
 void ui_cycle_camera_selection(void);
 void ui_show_message(const char* message, uint16_t color, int duration_ms);
 void ui_show_shutter_bottom_message(const char* message, uint16_t color, int duration_ms);
+void ui_post_shutter_message(const char *message, uint16_t color, uint32_t duration_ms);
+void ui_process_command_results(void);
 void ui_show_not_connected_message(void);
 const char* ui_get_camera_model_name(uint32_t device_id);
 esp_err_t save_all_cameras_to_nvs(void);
 void ui_process_pending_gpio_actions(void);
-void ui_process_wake_and_record(void);
+void ui_process_link_events(void);
 void ui_process_wake_queue(void);
 void ui_process_single_camera_wake_timeout(void);
 
@@ -190,6 +184,7 @@ void wake_queue_init(void);
 bool wake_queue_add(int camera_index);
 int wake_queue_get_next(void);
 void wake_queue_clear(void);
+bool wake_queue_remove(int slot);
 bool wake_queue_is_empty(void);
 int wake_queue_get_count(void);
 void wake_queue_notify_camera_woke_up(int camera_index);

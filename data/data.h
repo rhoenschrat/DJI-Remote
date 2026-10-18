@@ -14,9 +14,9 @@ esp_err_t data_write_with_response(int camera_index, uint16_t seq, const uint8_t
 
 esp_err_t data_write_without_response(int camera_index, uint16_t seq, const uint8_t *raw_data, size_t raw_data_length);
 
-esp_err_t data_wait_for_result_by_seq(uint16_t seq, int timeout_ms, void **out_result, size_t *out_result_length);
+esp_err_t data_wait_for_result_by_seq(int slot, uint16_t seq, int timeout_ms, void **out_result, size_t *out_result_length);
 
-esp_err_t data_wait_for_result_by_cmd(uint8_t cmd_set, uint8_t cmd_id, int timeout_ms, uint16_t *out_seq, void **out_result, size_t *out_result_length);
+esp_err_t data_wait_for_result_by_cmd(int slot, uint8_t cmd_set, uint8_t cmd_id, int timeout_ms, uint16_t *out_seq, void **out_result, size_t *out_result_length);
 
 typedef void (*camera_status_update_cb_t)(int camera_index, void *data);
 void data_register_status_update_callback(camera_status_update_cb_t callback);
@@ -25,5 +25,9 @@ typedef void (*new_camera_status_update_cb_t)(int camera_index, void *data);
 void data_register_new_status_update_callback(new_camera_status_update_cb_t callback);
 
 void receive_camera_notify_handler(int camera_index, const uint8_t *raw_data, size_t raw_data_length);
+
+/* Notifications dropped for a slot (queue full or malloc failure),
+ * cumulative since boot; 0 for an invalid slot */
+unsigned int data_get_notify_drops(int slot);
 
 #endif

@@ -1,12 +1,25 @@
 /*
  * Central Logging Configuration for DJI-Remote
- * 
+ *
  * This module provides a centralized way to control logging verbosity
  * across the entire application using ESP-IDF's logging system.
- * 
- * All ESP_LOGx calls throughout the codebase will respect the log level
- * set via app_log_set_level(). The level can be configured at compile time
- * via APP_DEFAULT_LOG_LEVEL or at runtime via app_log_set_level().
+ *
+ * All ESP_LOGx calls throughout the codebase respect the level set via
+ * app_log_set_level(). The level is chosen at build time via
+ * APP_DEFAULT_LOG_LEVEL (default: ERROR) and applied once at boot.
+ *
+ * CONFIG_LOG_MAXIMUM_LEVEL_DEBUG is set in the board defaults, so ESP_LOGD
+ * is compiled in and DEBUG can be enabled per tag at runtime.
+ *
+ * Build profiles:
+ *   - Release:     APP_DEFAULT_LOG_LEVEL=APP_LOG_LEVEL_ERROR (default)
+ *   - Field log:   APP_DEFAULT_LOG_LEVEL=APP_LOG_LEVEL_INFO
+ *                  (one line per state change or user action)
+ *   - Diagnostics: field log plus APP_BLE_DIAG_LOG=1
+ *                  (one BLE_DIAG line per paired slot every 10 s)
+ *
+ * At INFO and above, NimBLE's own per-procedure INFO lines (tag "NimBLE",
+ * e.g. "GATT procedure initiated") are filtered to WARN at runtime.
  */
 
 #ifndef LOG_CONFIG_H
@@ -39,19 +52,36 @@ typedef enum {
  * 
  * Can be overridden at build time using -DAPP_DEFAULT_LOG_LEVEL=APP_LOG_LEVEL_XXX
  * Examples:
- *   - Development: APP_LOG_LEVEL_INFO (default)
- *   - Testing: APP_LOG_LEVEL_WARN
- *   - Production: APP_LOG_LEVEL_ERROR or APP_LOG_LEVEL_NONE
+ *   - Release (default): APP_LOG_LEVEL_ERROR
+ *   - Field logging:     APP_LOG_LEVEL_INFO
+ *   - Testing:           APP_LOG_LEVEL_WARN
  */
 #ifndef APP_DEFAULT_LOG_LEVEL
 #define APP_DEFAULT_LOG_LEVEL APP_LOG_LEVEL_ERROR
 #endif
 
 /**
+ * @brief Per-slot BLE diagnostics line (tag APP_LOG_TAG_BLE_DIAG)
+ *
+ * 1 enables DEBUG for the diagnostics tag; link_evt_task then logs one line
+ * per paired slot every 10 s. Can be overridden with -DAPP_BLE_DIAG_LOG=1.
+ */
+#ifndef APP_BLE_DIAG_LOG
+#define APP_BLE_DIAG_LOG 0
+#endif
+
+/** Log tag of the per-slot BLE diagnostics line */
+#define APP_LOG_TAG_BLE_DIAG "BLE_DIAG"
+
+/** NimBLE host log tag (filtered to WARN at INFO and above) */
+#define APP_LOG_TAG_NIMBLE "NimBLE"
+
+/**
  * @brief Set the global application log level
  * 
  * This function applies the specified log level globally to all ESP_LOGx
- * calls throughout the application by calling esp_log_level_set("*", level).
+ * calls throughout the application by calling esp_log_level_set("*", level),
+ * then applies the per-tag overrides (NimBLE filter, BLE_DIAG switch).
  * 
  * @param level The desired log level (APP_LOG_LEVEL_NONE through APP_LOG_LEVEL_VERBOSE)
  */

@@ -19,12 +19,14 @@
 
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "driver/gpio.h"
 #include <time.h>
 #include <math.h>
 
 #include "connect_logic.h"
 #include "light_logic.h"
+#include "diag.h"
 #include "sdkconfig.h"
 
 /* Board HAL selection — driven by Kconfig (main/Kconfig.projbuild) */
@@ -55,6 +57,8 @@
 #include "esp_lvgl_port.h"
 #include "../gps/gps_reader.h"
 #include "command_logic.h"
+#include "command_worker.h"
+#include "status_logic.h"
 #include "freertos/task.h"
 #include "dji_protocol_data_structures.h"
 #include "../log_config.h"
@@ -92,6 +96,10 @@ void app_main(void) {
      * Configure global log level before any subsystems start logging
      */
     app_log_set_level(APP_DEFAULT_LOG_LEVEL);
+
+    /* Persistent fault diagnostics (ADR-022). Before HAL_INIT so a restart is
+     * recorded even if a later init step fails; uses its own NVS partition. */
+    diag_init();
 
     /* 
      * HARDWARE INITIALIZATION PHASE
@@ -183,6 +191,12 @@ void app_main(void) {
      * the BLE stack tasks. */
     ui_early_init();
 
+    /* Per-slot command workers (ADR-020); need the data layer from
+     * ui_early_init() and must exist before buttons are handled */
+    if (command_worker_init() != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start command workers");
+    }
+
     /* Keep splash screen visible for ~2 seconds total (includes the
      * 100 ms pre-backlight wait above). */
     vTaskDelay(pdMS_TO_TICKS(1900));
@@ -198,6 +212,9 @@ void app_main(void) {
 
     /* System ready - log operational information for user */
     ESP_LOGI(TAG, "System ready - Icon-based UI active!");
+    ESP_LOGI(TAG, "Free heap after init: %lu bytes (min %lu)",
+             (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)esp_get_minimum_free_heap_size());
     ESP_LOGI(TAG, "Button A: Select/execute current option");
     ESP_LOGI(TAG, "Button B: Cycle through options");
 
@@ -311,11 +328,17 @@ void app_main(void) {
         ui_process_pending_gpio_actions();
 
         /*
-         * WAKE-AND-RECORD PROCESSING
-         * Process wake state machine for reliable camera wake-up and recording
-         * Must be called before display update to ensure state is current
+         * LINK-LOSS CLEANUP (ADR-018)
+         * Remove slots that lost their link from the wake queue and stop a
+         * wake broadcast aimed at them. Must run before the wake queue.
          */
-        ui_process_wake_and_record();
+        ui_process_link_events();
+
+        /*
+         * COMMAND RESULTS (ADR-020)
+         * Show results of per-slot worker jobs without blocking
+         */
+        ui_process_command_results();
         
         /*
          * WAKE QUEUE PROCESSING
@@ -347,11 +370,9 @@ void app_main(void) {
         if (shutter_refresh_timer >= 1000) {
             shutter_refresh_timer = 0;
             extern ui_state_t g_ui_state;
-            extern bool camera_status_initialized;
-            bool is_camera_recording(void);
-            
-            /* Refresh Main Screen when recording to update elapsed time */
-            if (camera_status_initialized && is_camera_recording()) {
+
+            /* Refresh Main Screen when any slot records to update elapsed time */
+            if (status_logic_any_slot_recording()) {
                 g_ui_state.display_needs_update = true;
             }
         }

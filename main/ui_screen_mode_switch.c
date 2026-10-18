@@ -12,6 +12,7 @@
 #include "ui_layout.h"
 #include "lvgl_icons.h"
 #include "command_logic.h"
+#include "command_worker.h"
 #include "enums_logic.h"
 #include "esp_log.h"
 #include <string.h>
@@ -221,12 +222,14 @@ void ui_screen_mode_switch_button_a(void) {
         return;
     }
 
-    esp_err_t ret = command_logic_send_key_report_for_slot(
-        s_camera_index, 0x02, 0x01, 0x00);
+    /* QS key on the slot's worker (ADR-020); the result is only logged */
+    esp_err_t ret = command_worker_submit(s_camera_index, CMD_JOB_KEY_QS);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "QS command sent to camera %d", s_camera_index + 1);
+        ESP_LOGI(TAG, "QS job submitted for camera %d", s_camera_index + 1);
+    } else if (ret == ESP_ERR_NOT_FINISHED) {
+        ESP_LOGW(TAG, "Camera %d busy, QS ignored", s_camera_index + 1);
     } else {
-        ESP_LOGW(TAG, "QS command failed for camera %d: %s",
+        ESP_LOGW(TAG, "QS not submitted for camera %d: %s",
                  s_camera_index + 1, esp_err_to_name(ret));
     }
 }

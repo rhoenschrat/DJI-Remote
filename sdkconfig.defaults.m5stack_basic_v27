@@ -80,3 +80,7 @@ CONFIG_GPS_UART_BAUD_RATE=115200
 CONFIG_GPS_UART_TX_PIN=17
 CONFIG_GPS_UART_RX_PIN=16
 
+
+# Logging: compile ESP_LOGD in so DEBUG can be enabled per tag at runtime
+# (log_config.c). The default runtime level is set by APP_DEFAULT_LOG_LEVEL.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

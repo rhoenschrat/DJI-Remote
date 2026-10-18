@@ -1,5 +1,33 @@
 # Release Notes
 
+## DJI-Remote v1.3.0 (in preparation)
+
+Stability release: each camera connection is handled independently, so one
+camera with a problem no longer affects the others or the remote.
+
+### What's New in v1.3.0
+
+- **Per-camera link loss** — A camera that drops its connection only resets
+  its own slot; the other cameras keep working. Reconnect it with Button A.
+- **Unresponsive cameras are detected** — A camera that stays connected but
+  stops sending status shows a yellow warning triangle after about 6 s and
+  is disconnected after 15 s.
+- **The remote never waits for a camera** — Commands run in the background
+  per camera. Pressing again before the camera answered shows "Busy".
+- **More tolerant connections** — Short radio dropouts (up to about 5 s) no
+  longer close the connection.
+- **Faster boot scan** — If a paired camera is switched off, the boot scan
+  ends about 10 s after the first camera is found instead of after 30 s.
+- **Fault diagnostics** — The remote records connection faults and restarts
+  in its own flash area, also without a computer attached. Read them over
+  USB after a tour with `tools/diag/dji_diag` (see `tools/diag/README.md`).
+
+### Update Notes
+
+- This update adds a new flash partition for the diagnostics. Flashing the
+  merged binary updates the partition table automatically. **Pairing data is
+  kept.**
+
 ## DJI-Remote v1.2.1
 
 Maintenance release for the Waveshare ESP32-S3-LCD-1.9 target. The 320x170 UI

@@ -40,4 +40,17 @@ void ui_screen_main_set_notification(const char *text, lv_color_t color);
  */
 void ui_screen_main_clear_notification(void);
 
+/**
+ * Show a notification that clears itself after @p duration_ms via a one-shot
+ * LVGL timer (non-blocking). A new post replaces the text and restarts the
+ * timer. Caller must hold the LVGL lock.
+ */
+void ui_screen_main_post_notification(const char *text, lv_color_t color, uint32_t duration_ms);
+
+/**
+ * Cancel a pending post-notification timer (e.g. before a blocking message
+ * takes over the label). Caller must hold the LVGL lock.
+ */
+void ui_screen_main_cancel_notification_timer(void);
+
 #endif

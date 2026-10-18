@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Runs dji_diag.py with the project-local ESP-IDF Python (esptool and the
+# NVS parser come from there; no extra packages needed).
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/../idf/env.sh"
+PY="$(ls -d "$IDF_TOOLS_PATH"/python_env/idf*_env/bin/python 2>/dev/null | head -1)"
+if [ -z "$PY" ]; then
+    echo "ESP-IDF Python environment not found. Run tools/idf/setup.sh" >&2
+    exit 1
+fi
+exec "$PY" "$HERE/dji_diag.py" "$@"

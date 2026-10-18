@@ -34,7 +34,7 @@ const data_descriptor_t *find_data_descriptor(uint8_t cmd_set, uint8_t cmd_id) {
  * @return Return 0 on success, -1 or -2 on failure
  */
 int data_parser_by_structure(uint8_t cmd_set, uint8_t cmd_id, uint8_t cmd_type, const uint8_t *data, size_t data_length, void *structure_out) {
-    ESP_LOGI(TAG, "Parsing CmdSet: 0x%02X, CmdID: 0x%02X, CmdType: 0x%02X", cmd_set, cmd_id, cmd_type);
+    ESP_LOGD(TAG, "Parsing CmdSet: 0x%02X, CmdID: 0x%02X, CmdType: 0x%02X", cmd_set, cmd_id, cmd_type);
 
     // Find corresponding descriptor
     const data_descriptor_t *descriptor = find_data_descriptor(cmd_set, cmd_id);

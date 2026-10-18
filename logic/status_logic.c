@@ -30,74 +30,98 @@
 
 static const char *TAG = "LOGIC_STATUS";
 
-// Global variables to store various camera status information
-uint8_t current_camera_mode = 0;
-uint8_t current_camera_status = 0;
-uint8_t current_video_resolution = 0;
-uint8_t current_fps_idx = 0;
-uint8_t current_eis_mode = 0;
-uint8_t current_user_mode = 0;
-uint8_t current_camera_mode_next_flag = 0;
-uint16_t current_record_time = 0;
-uint16_t current_timelapse_interval = 0;
-uint32_t current_remain_capacity = 0;
-uint32_t current_remain_time = 0;
-uint8_t current_camera_bat_percentage = 0;
-uint8_t current_power_mode = 0;  // Sleep mode tracking: 0=normal, 3=sleep
-bool camera_status_initialized = false;
-uint32_t g_last_status_push_timestamp = 0;  // Timestamp of last camera status push (milliseconds)
+/* Debug-only hang simulation for the liveness watchdog (ADR-019).
+ * Set LIVENESS_DEBUG_MUTE_SLOT to 0..2 to drop that slot's 1D02 pushes once
+ * per boot, starting after LIVENESS_DEBUG_MUTE_AFTER pushes (~20 s at 2 Hz):
+ * - LIVENESS_DEBUG_MUTE_MS > 0: resume after that many ms (recovery test)
+ * - LIVENESS_DEBUG_MUTE_MS = 0: stay muted until the link is gone; the first
+ *   push more than 20 s after muting began (a new link) ends the simulation
+ * Must stay -1 in committed code. */
+#define LIVENESS_DEBUG_MUTE_SLOT   (-1)
+#define LIVENESS_DEBUG_MUTE_MS     0
+#define LIVENESS_DEBUG_MUTE_AFTER  40
 
-// Global variables for new camera status push command frame
-uint8_t current_type_mode_name = 0;
-uint8_t current_mode_name_length = 0;
-uint8_t current_mode_name[20] = {0};
-uint8_t current_type_mode_param = 0;
-uint8_t current_mode_param_length = 0;
-uint8_t current_mode_param[20] = {0};
+#if LIVENESS_DEBUG_MUTE_SLOT >= 0
+static bool liveness_debug_drop_push(int camera_index) {
+    static int s_count = 0;
+    static bool s_muting = false;
+    static bool s_done = false;
+    static uint32_t s_start_ms = 0;
 
+    if (camera_index != LIVENESS_DEBUG_MUTE_SLOT || s_done) return false;
+
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (!s_muting) {
+        if (++s_count < LIVENESS_DEBUG_MUTE_AFTER) return false;
+        s_muting = true;
+        s_start_ms = now;
+        ESP_LOGW(TAG, "DEBUG: muting 1D02 pushes of camera %d", camera_index);
+        return true;
+    }
+
+    uint32_t muted_ms = now - s_start_ms;
+#if LIVENESS_DEBUG_MUTE_MS > 0
+    bool resume = (muted_ms >= LIVENESS_DEBUG_MUTE_MS);
+#else
+    bool resume = (muted_ms > 20000);
+#endif
+    if (resume) {
+        s_muting = false;
+        s_done = true;
+        ESP_LOGW(TAG, "DEBUG: camera %d pushes resumed after %lu ms",
+                 camera_index, (unsigned long)muted_ms);
+        return false;
+    }
+    return true;
+}
+#endif
 
 /**
- * @brief Check if camera is recording
- * 
- * Check if camera is in recording or pre-recording state, and status is initialized.
- * 
- * @return bool Returns true if camera is recording, false otherwise
+ * @brief Check whether any connected slot is recording
+ *
+ * Replaces the former slot-0-only is_camera_recording().
+ *
+ * @return true if at least one connected camera is recording
  */
-bool is_camera_recording() {
-    if ((current_camera_status == CAMERA_STATUS_PHOTO_OR_RECORDING || current_camera_status == CAMERA_STATUS_PRE_RECORDING) && camera_status_initialized) {
-        return true;
+bool status_logic_any_slot_recording(void) {
+    for (int i = 0; i < NUM_CAMERAS; i++) {
+        if (command_logic_slot_is_connected(i) && g_camera_states[i].is_recording) {
+            return true;
+        }
     }
     return false;
 }
 
 /**
- * @brief Print current camera status (partial status, other status can be printed as needed)
- * 
- * Print camera mode, status, resolution, frame rate and electronic image stabilization mode.
+ * @brief Print the current 1D02 status of one camera slot
  */
-void print_camera_status() {
-    if (!camera_status_initialized) {
-        ESP_LOGW(TAG, "Camera status has not been initialized.");
+void print_camera_status(int slot) {
+    if (slot < 0 || slot >= NUM_CAMERAS) {
+        return;
+    }
+    const camera_state_t *cam = &g_camera_states[slot];
+    if (!cam->is_initialized) {
+        ESP_LOGW(TAG, "Camera %d status has not been initialized.", slot);
         return;
     }
 
-    const char *mode_str = camera_mode_to_string((camera_mode_t)current_camera_mode);
-    const char *status_str = camera_status_to_string((camera_status_t)current_camera_status);
-    const char *resolution_str = video_resolution_to_string((video_resolution_t)current_video_resolution);
-    const char *fps_str = fps_idx_to_string((fps_idx_t)current_fps_idx);
-    const char *eis_str = eis_mode_to_string((eis_mode_t)current_eis_mode);
+    const char *mode_str = camera_mode_to_string((camera_mode_t)cam->camera_mode);
+    const char *status_str = camera_status_to_string((camera_status_t)cam->camera_status);
+    const char *resolution_str = video_resolution_to_string((video_resolution_t)cam->video_resolution);
+    const char *fps_str = fps_idx_to_string((fps_idx_t)cam->fps_idx);
+    const char *eis_str = eis_mode_to_string((eis_mode_t)cam->eis_mode);
 
-    ESP_LOGI(TAG, "[1D02] =========== Camera Status Push ===========");
-    ESP_LOGI(TAG, "  Mode: %s", mode_str);
-    ESP_LOGI(TAG, "  Status: %s", status_str);
-    ESP_LOGI(TAG, "  Resolution: %s (value: %d)", resolution_str, current_video_resolution);
-    ESP_LOGI(TAG, "  FPS: %s", fps_str);
-    ESP_LOGI(TAG, "  EIS: %s", eis_str);
-    ESP_LOGI(TAG, "  User mode: %d", current_user_mode);
-    ESP_LOGI(TAG, "  Camera mode next flag: %d", current_camera_mode_next_flag);
-    ESP_LOGI(TAG, "  Record time: %d", current_record_time);
-    ESP_LOGI(TAG, "  Timelapse interval: %d", current_timelapse_interval);
-    ESP_LOGI(TAG, "=================================================");
+    ESP_LOGD(TAG, "[1D02] =========== Camera %d Status Push ===========", slot);
+    ESP_LOGD(TAG, "  Mode: %s", mode_str);
+    ESP_LOGD(TAG, "  Status: %s", status_str);
+    ESP_LOGD(TAG, "  Resolution: %s (value: %d)", resolution_str, cam->video_resolution);
+    ESP_LOGD(TAG, "  FPS: %s", fps_str);
+    ESP_LOGD(TAG, "  EIS: %s", eis_str);
+    ESP_LOGD(TAG, "  User mode: %d", cam->user_mode);
+    ESP_LOGD(TAG, "  Camera mode next flag: %d", cam->camera_mode_next_flag);
+    ESP_LOGD(TAG, "  Record time: %d", cam->record_time);
+    ESP_LOGD(TAG, "  Timelapse interval: %d", cam->timelapse_interval);
+    ESP_LOGD(TAG, "=================================================");
 }
 
 /**
@@ -111,8 +135,10 @@ void print_camera_status() {
 int subscript_camera_status(int camera_index, uint8_t push_mode, uint8_t push_freq) {
     ESP_LOGI(TAG, "Subscribing to Camera %d Status with push_mode: %d, push_freq: %d", camera_index, push_mode, push_freq);
 
-    if (connect_logic_get_state() != PROTOCOL_CONNECTED) {
-        ESP_LOGE(TAG, "Protocol connection to the camera failed. Current connection state: %d", connect_logic_get_state());
+    /* Per-slot guard: this slot's link and handshake, not a global state */
+    if (!ble_is_camera_connected(camera_index) ||
+        !connect_logic_slot_is_protocol_connected(camera_index)) {
+        ESP_LOGE(TAG, "Camera %d: cannot subscribe, link or protocol not connected", camera_index);
         return -1;
     }
 
@@ -147,14 +173,17 @@ void update_camera_state_handler(int camera_index, void *data) {
         return;
     }
 
+#if LIVENESS_DEBUG_MUTE_SLOT >= 0
+    if (liveness_debug_drop_push(camera_index)) return;
+#endif
+
     const camera_status_push_command_frame *parsed_data = (const camera_status_push_command_frame *)data;
 
     // Get reference to this camera's state
     camera_state_t *cam_state = &g_camera_states[camera_index];
 
-    // Update timestamp of last status push for wake-and-record confirmation
-    g_last_status_push_timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    cam_state->last_status_timestamp = g_last_status_push_timestamp;
+    // Per-slot timestamp of the last status push
+    cam_state->last_status_timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS;
 
     bool state_changed = false;
 
@@ -163,11 +192,6 @@ void update_camera_state_handler(int camera_index, void *data) {
         cam_state->camera_mode = parsed_data->camera_mode;
         ESP_LOGI(TAG, "Camera %d: Camera mode updated to: %d", camera_index, cam_state->camera_mode);
         state_changed = true;
-        
-        // Update old global for camera 0
-        if (camera_index == 0) {
-            current_camera_mode = parsed_data->camera_mode;
-        }
     }
 
     // Check and update camera status
@@ -198,92 +222,77 @@ void update_camera_state_handler(int camera_index, void *data) {
         cam_state->is_recording = is_now_recording;
         
         state_changed = true;
-        
-        // Update old global for camera 0
-        if (camera_index == 0) {
-            current_camera_status = parsed_data->camera_status;
-        }
     }
 
     // Check and update video resolution
     if (cam_state->video_resolution != parsed_data->video_resolution) {
         cam_state->video_resolution = parsed_data->video_resolution;
-        ESP_LOGI(TAG, "Camera %d: Video resolution updated to: %d", camera_index, cam_state->video_resolution);
+        ESP_LOGD(TAG, "Camera %d: Video resolution updated to: %d", camera_index, cam_state->video_resolution);
         state_changed = true;
-        if (camera_index == 0) current_video_resolution = parsed_data->video_resolution;
     }
 
     // Check and update frame rate
     if (cam_state->fps_idx != parsed_data->fps_idx) {
         cam_state->fps_idx = parsed_data->fps_idx;
-        ESP_LOGI(TAG, "Camera %d: FPS index updated to: %d", camera_index, cam_state->fps_idx);
+        ESP_LOGD(TAG, "Camera %d: FPS index updated to: %d", camera_index, cam_state->fps_idx);
         state_changed = true;
-        if (camera_index == 0) current_fps_idx = parsed_data->fps_idx;
     }
 
     // Check and update electronic image stabilization mode
     if (cam_state->eis_mode != parsed_data->eis_mode) {
         cam_state->eis_mode = parsed_data->eis_mode;
-        ESP_LOGI(TAG, "Camera %d: EIS mode updated to: %d", camera_index, cam_state->eis_mode);
+        ESP_LOGD(TAG, "Camera %d: EIS mode updated to: %d", camera_index, cam_state->eis_mode);
         state_changed = true;
-        if (camera_index == 0) current_eis_mode = parsed_data->eis_mode;
     }
 
     // Check and update user mode  
     if (cam_state->user_mode != parsed_data->user_mode) {
         cam_state->user_mode = parsed_data->user_mode;
-        ESP_LOGI(TAG, "Camera %d: User mode updated to: %d", camera_index, cam_state->user_mode);
+        ESP_LOGD(TAG, "Camera %d: User mode updated to: %d", camera_index, cam_state->user_mode);
         state_changed = true;
-        if (camera_index == 0) current_user_mode = parsed_data->user_mode;
     }
 
     // Check and update camera mode next flag
     if (cam_state->camera_mode_next_flag != parsed_data->camera_mode_next_flag) {
         cam_state->camera_mode_next_flag = parsed_data->camera_mode_next_flag;
-        ESP_LOGI(TAG, "Camera %d: Camera mode next flag updated to: %d", camera_index, cam_state->camera_mode_next_flag);
+        ESP_LOGD(TAG, "Camera %d: Camera mode next flag updated to: %d", camera_index, cam_state->camera_mode_next_flag);
         state_changed = true;
-        if (camera_index == 0) current_camera_mode_next_flag = parsed_data->camera_mode_next_flag;
     }
 
     // Check and update record time
     if (cam_state->record_time != parsed_data->record_time) {
         cam_state->record_time = parsed_data->record_time;
-        ESP_LOGI(TAG, "Camera %d: Record time updated to: %d", camera_index, cam_state->record_time);
+        ESP_LOGD(TAG, "Camera %d: Record time updated to: %d", camera_index, cam_state->record_time);
         state_changed = true;
-        if (camera_index == 0) current_record_time = parsed_data->record_time;
     }
 
     // Check and update timelapse interval
     if (cam_state->timelapse_interval != parsed_data->timelapse_interval) {
         cam_state->timelapse_interval = parsed_data->timelapse_interval;
-        ESP_LOGI(TAG, "Camera %d: Timelapse interval updated to: %d", camera_index, cam_state->timelapse_interval);
+        ESP_LOGD(TAG, "Camera %d: Timelapse interval updated to: %d", camera_index, cam_state->timelapse_interval);
         state_changed = true;
-        if (camera_index == 0) current_timelapse_interval = parsed_data->timelapse_interval;
     }
 
     // Check and update remain capacity
     if (cam_state->remain_capacity != parsed_data->remain_capacity) {
         cam_state->remain_capacity = parsed_data->remain_capacity;
-        ESP_LOGI(TAG, "Camera %d: Remain capacity updated to: %lu MB", camera_index, (unsigned long)cam_state->remain_capacity);
+        ESP_LOGD(TAG, "Camera %d: Remain capacity updated to: %lu MB", camera_index, (unsigned long)cam_state->remain_capacity);
         state_changed = true;
-        if (camera_index == 0) current_remain_capacity = parsed_data->remain_capacity;
     }
 
     // Check and update remain time
     if (cam_state->remain_time != parsed_data->remain_time) {
         cam_state->remain_time = parsed_data->remain_time;
-        ESP_LOGI(TAG, "Camera %d: Remain time updated to: %lu seconds", camera_index, (unsigned long)cam_state->remain_time);
+        ESP_LOGD(TAG, "Camera %d: Remain time updated to: %lu seconds", camera_index, (unsigned long)cam_state->remain_time);
         state_changed = true;
-        if (camera_index == 0) current_remain_time = parsed_data->remain_time;
     }
 
     // Check and update camera battery percentage
     if (cam_state->camera_bat_percentage != parsed_data->camera_bat_percentage) {
         cam_state->camera_bat_percentage = parsed_data->camera_bat_percentage;
         cam_state->battery_percentage = parsed_data->camera_bat_percentage; // Also update alias
-        ESP_LOGI(TAG, "Camera %d: Camera battery updated to: %d%%", camera_index, cam_state->camera_bat_percentage);
+        ESP_LOGD(TAG, "Camera %d: Camera battery updated to: %d%%", camera_index, cam_state->camera_bat_percentage);
         state_changed = true;
-        if (camera_index == 0) current_camera_bat_percentage = parsed_data->camera_bat_percentage;
     }
 
     // Check and update power mode
@@ -308,10 +317,9 @@ void update_camera_state_handler(int camera_index, void *data) {
             }
         }
         
-        ESP_LOGI(TAG, "Camera %d: Power mode updated to: %d (%s)", camera_index, cam_state->power_mode, 
+        ESP_LOGD(TAG, "Camera %d: Power mode updated to: %d (%s)", camera_index, cam_state->power_mode, 
                  cam_state->is_sleeping ? "SLEEP" : "NORMAL");
         state_changed = true;
-        if (camera_index == 0) current_power_mode = parsed_data->power_mode;
     }
     
     // Check for wake-up transition (power_mode changed from 3 to 0)
@@ -354,23 +362,18 @@ void update_camera_state_handler(int camera_index, void *data) {
     bool was_just_initialized = false;
     if (!cam_state->is_initialized) {
         cam_state->is_initialized = true;
-        ESP_LOGI(TAG, "Camera %d state fully updated and marked as initialized.", camera_index);
+        ESP_LOGD(TAG, "Camera %d state fully updated and marked as initialized.", camera_index);
         state_changed = true;  // Force status print as this is initialization
         was_just_initialized = true;
-        
-        // Also mark global flag for camera 0
-        if (camera_index == 0 && !camera_status_initialized) {
-            camera_status_initialized = true;
-        }
     }
 
     // If state changed or first initialization, request UI update
     if (state_changed) {
         // Only print for camera 0 to avoid log spam
         if (camera_index == 0) {
-            print_camera_status();
+            print_camera_status(camera_index);
         } else {
-            ESP_LOGI(TAG, "Camera %d status updated", camera_index);
+            ESP_LOGD(TAG, "Camera %d status updated", camera_index);
         }
         
         // Request UI update (always on Main screen now)
@@ -401,33 +404,44 @@ void update_new_camera_state_handler(int camera_index, void *data) {
     extern camera_state_t g_camera_states[NUM_CAMERAS];
     camera_state_t *cam_state = &g_camera_states[camera_index];
 
-    ESP_LOGI(TAG, "Camera %d [1D06] =============New Status Push============", camera_index);
+    ESP_LOGD(TAG, "Camera %d [1D06] =============New Status Push============", camera_index);
+
+    // Per push at DEBUG; one INFO line only when the mode name changes
+    char prev_mode_name[sizeof(cam_state->mode_name)];
+    memcpy(prev_mode_name, cam_state->mode_name, sizeof(prev_mode_name));
+    prev_mode_name[sizeof(prev_mode_name) - 1] = '\0';
 
     // Store mode_name (ensure null termination)
     memset(cam_state->mode_name, 0, sizeof(cam_state->mode_name));
     size_t mode_name_len = (parsed_data->mode_name_length < 20) ? parsed_data->mode_name_length : 20;
     memcpy(cam_state->mode_name, parsed_data->mode_name, mode_name_len);
     cam_state->mode_name[20] = '\0';  // Ensure null termination
-    ESP_LOGI(TAG, "[1D06] Mode name: %s (length: %d)", cam_state->mode_name, parsed_data->mode_name_length);
+    ESP_LOGD(TAG, "[1D06] Mode name: %s (length: %d)", cam_state->mode_name, parsed_data->mode_name_length);
     
     // Store mode_param (ensure null termination)
     memset(cam_state->mode_param, 0, sizeof(cam_state->mode_param));
     size_t mode_param_len = (parsed_data->mode_param_length < 20) ? parsed_data->mode_param_length : 20;
     memcpy(cam_state->mode_param, parsed_data->mode_param, mode_param_len);
     cam_state->mode_param[20] = '\0';  // Ensure null termination
-    ESP_LOGI(TAG, "[1D06] Mode parameters: '%s' (length: %d)", cam_state->mode_param, parsed_data->mode_param_length);
+    ESP_LOGD(TAG, "[1D06] Mode parameters: '%s' (length: %d)", cam_state->mode_param, parsed_data->mode_param_length);
+    if (strcmp(prev_mode_name, cam_state->mode_name) != 0) {
+        ESP_LOGI(TAG, "Camera %d: mode changed to '%s' '%s' (1D06)",
+                 camera_index, cam_state->mode_name, cam_state->mode_param);
+    }
 
     // Mark this camera as supporting new status push (1D06)
     // Once set to true, this flag stays true for the entire pairing session.
     // Video Mode Area will now be updated ONLY from 1D06, not from 1D02.
+    if (!cam_state->camera_supports_new_status_push) {
+        ESP_LOGI(TAG, "Camera %d: uses new status push (1D06)", camera_index);
+    }
     cam_state->camera_supports_new_status_push = true;
-    ESP_LOGI(TAG, "[1D06] Camera %d now uses new status push (1D06)", camera_index);
 
     // Trigger UI update
     extern ui_state_t g_ui_state;
     g_ui_state.display_needs_update = true;
 
-    ESP_LOGI(TAG, "[1D06] ================================");
+    ESP_LOGD(TAG, "[1D06] ================================");
 
     free(data);
 }

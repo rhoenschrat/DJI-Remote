@@ -65,13 +65,34 @@ typedef struct {
 
     connection_status_t connection_status;
     handle_discovery_t handle_discovery;
+
+    /* esp_timer time (us) of the last notification; 0 = none since connect */
+    int64_t last_rx_us;
+
+    /* Applied supervision timeout of the current link in 10 ms units;
+     * 0 = no link (ADR-021). Written on the host task only. */
+    uint16_t supervision_timeout;
+
+    /* One supervision-timeout correction per link (ADR-021); reset on connect */
+    bool sto_corrected;
 } ble_profile_t;
 
 /* Array of BLE profiles for multi-camera support */
 extern ble_profile_t s_ble_profiles[BLE_MAX_CAMERAS];
 
 typedef void (*ble_notify_callback_t)(int camera_index, const uint8_t *data, size_t length);
-typedef void (*connect_logic_state_callback_t)(void);
+
+/* Link event: an established camera link was closed (by the peer, by
+ * supervision timeout, or by a local ble_disconnect()). */
+typedef struct {
+    int      slot;        /* 0..BLE_MAX_CAMERAS-1 */
+    int      reason;      /* NimBLE disconnect reason (BLE_HS_ERR_HCI_BASE + HCI code) */
+    uint32_t silent_ms;   /* ms since last notification; UINT32_MAX if none since connect */
+} ble_link_event_t;
+
+/* Called on the NimBLE host task. MUST NOT block, wait, poll, or call
+ * connect logic — enqueue and return. */
+typedef void (*ble_link_event_callback_t)(const ble_link_event_t *evt);
 
 esp_err_t ble_init(void);
 
@@ -90,7 +111,7 @@ esp_err_t ble_write_with_response(uint16_t conn_id, uint16_t handle, const uint8
 esp_err_t ble_register_notify(uint16_t conn_id, uint16_t char_handle);
 esp_err_t ble_unregister_notify(uint16_t conn_id, uint16_t char_handle);
 void ble_set_notify_callback(ble_notify_callback_t cb);
-void ble_set_state_callback(connect_logic_state_callback_t cb);
+void ble_set_link_event_callback(ble_link_event_callback_t cb);
 
 esp_err_t ble_start_advertising(void);
 esp_err_t ble_wake_camera(const uint8_t* camera_mac);
@@ -104,8 +125,34 @@ uint16_t ble_get_write_handle(int camera_index);
 uint16_t ble_get_notify_handle(int camera_index);
 uint16_t ble_get_cccd_handle(int camera_index);
 bool ble_is_camera_connected(int camera_index);
+/* True once the slot has no connection handle any more, i.e. the
+ * BLE_GAP_EVENT_DISCONNECT of the last link was processed. ble_disconnect()
+ * clears is_connected immediately; the handle is only released by the event. */
+bool ble_is_link_released(int camera_index);
 
 void ble_set_target_device(int camera_index, const char* name, const uint8_t* mac);
+
+/* Minimum supervision timeout in 10 ms units (5 s), used for our own
+ * connect and as floor for camera-requested updates (ADR-021) */
+#define BLE_SUPERVISION_TIMEOUT_FLOOR 500
+
+/* Per-slot link diagnostics (liveness estimate, BLE_DIAG line) */
+typedef struct {
+    bool     link_up;           /* ble_is_camera_connected() */
+    uint32_t rx_age_ms;         /* UINT32_MAX if nothing received on this link */
+    uint32_t supervision_ms;    /* applied supervision timeout in ms, 0 if no link */
+    uint32_t gatt_failures;     /* failed GATT writes, cumulative since boot */
+    int      last_disc_reason;  /* last disconnect reason, -1 if never disconnected */
+} ble_slot_diag_t;
+
+/**
+ * @brief Snapshot of a slot's link diagnostics (any task)
+ *
+ * Read without locking. A torn read of the 64-bit RX timestamp on a 32-bit
+ * CPU is possible and acceptable for diagnostics and the release-wait
+ * estimate.
+ */
+esp_err_t ble_get_slot_diag(int camera_index, ble_slot_diag_t *out);
 
 esp_err_t ble_start_scan(scan_mode_t mode, int target_slot, uint32_t timeout_ms);
 esp_err_t ble_stop_scan(void);

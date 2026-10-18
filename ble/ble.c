@@ -11,10 +11,16 @@
  * - Notification data arrives as os_mbuf (copied to flat buffer)
  * - GATT discovery uses chained per-operation callbacks
  * - ble_gap_disc() has built-in timeout (no manual FreeRTOS timer needed)
+ *
+ * Callback rule (ADR-018): every callback into the application (notify and
+ * link events) runs on the NimBLE host task and must only copy/enqueue and
+ * return. Blocking there stalls BLE traffic for all cameras.
  */
 
 #include <string.h>
 #include <stdint.h>
+#include <stdatomic.h>
+#include <sys/param.h>  // MIN
 #include "ble.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -49,7 +55,7 @@ static bool s_advertising_active = false;
 static struct ble_gap_event_listener s_global_listener;
 
 static ble_notify_callback_t s_notify_cb = NULL;
-static connect_logic_state_callback_t s_state_cb = NULL;
+static ble_link_event_callback_t s_link_cb = NULL;
 
 static scan_controller_t s_scan_controller = {
     .mode = SCAN_MODE_IDLE,
@@ -64,6 +70,45 @@ static bool s_ble_scan_active = false;
 ble_profile_t s_ble_profiles[BLE_MAX_CAMERAS] = {0};
 
 static int s_active_scan_camera_index = -1;
+
+/* Per-slot diagnostics, cumulative since boot and never reset on disconnect.
+ * gatt_failures is incremented on the host task and by writer tasks;
+ * last_disc_reason is written on the host task only. */
+static atomic_uint s_gatt_failures[BLE_MAX_CAMERAS];
+static volatile int s_last_disc_reason[BLE_MAX_CAMERAS] = { -1, -1, -1 };
+
+/* ----------------------------------------------------------------
+ *  Connection parameters (ADR-021)
+ *
+ *  NimBLE's defaults (used when NULL is passed) except the supervision
+ *  timeout: 5 s instead of 2.56 s, so short radio dropouts (body or bike
+ *  shadowing on a motorcycle) no longer close the link. 5 s is what the
+ *  Osmo Action 5 Pro and Osmo 360 request themselves; a longer value would
+ *  delay rediscovery after a quick remote restart, because a camera only
+ *  advertises again once its side of the old link has timed out. "Link up
+ *  but camera dead" is covered by the liveness watchdog (ADR-019).
+ * ---------------------------------------------------------------- */
+
+static const struct ble_gap_conn_params s_conn_params = {
+    .scan_itvl           = 0x0010,   /* same as NimBLE's ble_gap_conn_params_dflt */
+    .scan_window         = 0x0010,
+    .itvl_min            = BLE_GAP_INITIAL_CONN_ITVL_MIN,
+    .itvl_max            = BLE_GAP_INITIAL_CONN_ITVL_MAX,
+    .latency             = BLE_GAP_INITIAL_CONN_LATENCY,
+    .supervision_timeout = BLE_SUPERVISION_TIMEOUT_FLOOR,
+    .min_ce_len          = BLE_GAP_INITIAL_CONN_MIN_CE_LEN,
+    .max_ce_len          = BLE_GAP_INITIAL_CONN_MAX_CE_LEN,
+};
+
+static inline bool slot_in_range(int slot) {
+    return slot >= 0 && slot < BLE_MAX_CAMERAS;
+}
+
+static inline void count_gatt_failure(int slot) {
+    if (slot_in_range(slot)) {
+        atomic_fetch_add(&s_gatt_failures[slot], 1);
+    }
+}
 
 /* ----------------------------------------------------------------
  *  UUIDs
@@ -108,6 +153,11 @@ static void init_ble_profiles(void) {
         s_ble_profiles[i].connection_status.is_connected = false;
         s_ble_profiles[i].handle_discovery.notify_char_handle_found = false;
         s_ble_profiles[i].handle_discovery.write_char_handle_found = false;
+        s_ble_profiles[i].last_rx_us = 0;
+        s_ble_profiles[i].supervision_timeout = 0;
+        s_ble_profiles[i].sto_corrected = false;
+        atomic_store(&s_gatt_failures[i], 0);
+        s_last_disc_reason[i] = -1;
     }
     ESP_LOGI(TAG, "Initialized %d BLE profiles for multi-camera support", BLE_MAX_CAMERAS);
 }
@@ -408,20 +458,94 @@ static int on_write_complete(uint16_t conn_handle,
                              const struct ble_gatt_error *error,
                              struct ble_gatt_attr *attr, void *arg)
 {
-    if (error->status != 0) {
-        ESP_LOGE(TAG, "Write failed, conn_handle=%d attr_handle=0x%x status=%d",
+    if (error->status == 0) {
+        ESP_LOGD(TAG, "Write complete, conn_handle=%d attr_handle=0x%x",
+                 conn_handle, attr ? attr->handle : 0);
+        return 0;
+    }
+
+    /* Every write passes its slot as callback argument; after a link loss
+     * the conn-handle lookup no longer finds a profile */
+    count_gatt_failure((int)(intptr_t)arg);
+
+    /* Only errors that mean the link itself is gone mark the slot
+     * disconnected. ATT errors (e.g. a rejected write) leave the link up;
+     * a real link loss is reported by BLE_GAP_EVENT_DISCONNECT. */
+    bool link_error = (error->status == BLE_HS_ENOTCONN ||
+                       error->status == BLE_HS_EDISABLED ||
+                       error->status == BLE_HS_ETIMEOUT);
+    ble_profile_t *profile = get_profile_by_conn_id(conn_handle);
+    if (link_error) {
+        ESP_LOGE(TAG, "Write failed (link error), conn_handle=%d attr_handle=0x%x status=%d",
                  conn_handle, attr ? attr->handle : 0, error->status);
-        ble_profile_t *profile = get_profile_by_conn_id(conn_handle);
         if (profile) {
             profile->connection_status.is_connected = false;
-            ESP_LOGW(TAG, "Camera %d: Marking as disconnected due to write failure",
+            ESP_LOGW(TAG, "Camera %d: Marking as disconnected due to link error",
                      profile->camera_index);
         }
     } else {
-        ESP_LOGI(TAG, "Write complete, conn_handle=%d attr_handle=0x%x",
-                 conn_handle, attr ? attr->handle : 0);
+        ESP_LOGW(TAG, "Write failed (ATT error 0x%x), conn_handle=%d attr_handle=0x%x, link kept",
+                 error->status, conn_handle, attr ? attr->handle : 0);
     }
     return 0;
+}
+
+/* ----------------------------------------------------------------
+ *  Connection parameter helpers (ADR-021, host task only)
+ * ---------------------------------------------------------------- */
+
+static void log_conn_params(int slot, const char *what, const struct ble_gap_conn_desc *desc) {
+    /* Interval in 1.25 ms units, timeout in 10 ms units */
+    unsigned itvl_x100 = (unsigned)desc->conn_itvl * 125;
+    ESP_LOGI(TAG, "Camera %d: %s itvl=%u.%02u ms latency=%u timeout=%u ms",
+             slot, what, itvl_x100 / 100, itvl_x100 % 100,
+             desc->conn_latency, (unsigned)desc->supervision_timeout * 10);
+}
+
+/* A completed parameter update. If the camera's values (typically from an
+ * L2CAP request, which we cannot modify) lowered the supervision timeout
+ * below the floor, correct it once per link with the same interval and
+ * latency. Asynchronous; never waits or retries. */
+static void handle_conn_update(uint16_t conn_handle, int status) {
+    ble_profile_t *profile = get_profile_by_conn_id(conn_handle);
+    int slot = profile ? profile->camera_index : -1;
+
+    if (status != 0) {
+        ESP_LOGW(TAG, "Camera %d: connection parameter update failed, status=%d", slot, status);
+        return;
+    }
+
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return;
+    }
+    if (profile) {
+        profile->supervision_timeout = desc.supervision_timeout;
+    }
+    log_conn_params(slot, "conn params updated", &desc);
+
+    if (!profile || desc.supervision_timeout >= BLE_SUPERVISION_TIMEOUT_FLOOR ||
+        profile->sto_corrected) {
+        return;
+    }
+
+    profile->sto_corrected = true;
+    struct ble_gap_upd_params upd = {
+        .itvl_min            = desc.conn_itvl,
+        .itvl_max            = desc.conn_itvl,
+        .latency             = desc.conn_latency,
+        .supervision_timeout = BLE_SUPERVISION_TIMEOUT_FLOOR,
+        .min_ce_len          = BLE_GAP_INITIAL_CONN_MIN_CE_LEN,
+        .max_ce_len          = BLE_GAP_INITIAL_CONN_MAX_CE_LEN,
+    };
+    int rc = ble_gap_update_params(conn_handle, &upd);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "Camera %d: supervision timeout correction refused, rc=%d (link kept)",
+                 slot, rc);
+    } else {
+        ESP_LOGI(TAG, "Camera %d: requesting supervision timeout %u ms",
+                 slot, (unsigned)BLE_SUPERVISION_TIMEOUT_FLOOR * 10);
+    }
 }
 
 /* ----------------------------------------------------------------
@@ -620,6 +744,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 
         profile->conn_id = event->connect.conn_handle;
         profile->connection_status.is_connected = true;
+        profile->last_rx_us = 0;
+        profile->supervision_timeout = desc.supervision_timeout;
+        profile->sto_corrected = false;
         memcpy(profile->remote_bda, peer_bda_be, 6);
 
         int slot = profile->camera_index;
@@ -637,6 +764,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                  slot, profile->conn_id,
                  peer_bda_be[0], peer_bda_be[1], peer_bda_be[2],
                  peer_bda_be[3], peer_bda_be[4], peer_bda_be[5]);
+        log_conn_params(slot, "conn params", &desc);
 
         ble_gattc_exchange_mtu(event->connect.conn_handle,
                                 on_mtu_exchanged,
@@ -651,6 +779,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 
         if (profile) {
             int camera_idx = profile->camera_index;
+
+            /* Silence time must be read before the profile is cleared */
+            uint32_t silent_ms = UINT32_MAX;
+            if (profile->last_rx_us > 0) {
+                silent_ms = (uint32_t)((esp_timer_get_time() - profile->last_rx_us) / 1000);
+            }
+
             profile->connection_status.is_connected = false;
             profile->conn_id = UINT16_MAX;
             profile->handle_discovery.write_char_handle_found = false;
@@ -658,20 +793,33 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             profile->notify_char_handle = 0;
             profile->write_char_handle = 0;
             profile->cccd_handle = 0;
-            ESP_LOGI(TAG, "Camera %d disconnected, reason=0x%x",
-                     camera_idx, event->disconnect.reason);
+            profile->last_rx_us = 0;
+            profile->supervision_timeout = 0;
+            if (slot_in_range(camera_idx)) {
+                s_last_disc_reason[camera_idx] = event->disconnect.reason;
+            }
+            ESP_LOGI(TAG, "Camera %d disconnected, reason=0x%x, silent_ms=%lu",
+                     camera_idx, event->disconnect.reason, (unsigned long)silent_ms);
 
             if (s_active_scan_camera_index == camera_idx) {
                 s_active_scan_camera_index = -1;
             }
+
+            s_connecting = false;
+
+            /* Hand the event to the application; the callback only enqueues */
+            if (s_link_cb && camera_idx >= 0 && camera_idx < BLE_MAX_CAMERAS) {
+                ble_link_event_t evt = {
+                    .slot = camera_idx,
+                    .reason = event->disconnect.reason,
+                    .silent_ms = silent_ms,
+                };
+                s_link_cb(&evt);
+            }
         } else {
             ESP_LOGW(TAG, "Disconnect for unknown conn_handle=%d, reason=0x%x",
                      conn_handle, event->disconnect.reason);
-        }
-
-        s_connecting = false;
-        if (s_state_cb) {
-            s_state_cb();
+            s_connecting = false;
         }
         break;
     }
@@ -681,10 +829,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         uint16_t conn_handle = event->notify_rx.conn_handle;
         uint16_t attr_handle = event->notify_rx.attr_handle;
         uint16_t data_len = OS_MBUF_PKTLEN(event->notify_rx.om);
-        ESP_LOGI(TAG, "NOTIFY_RX: conn_handle=%d attr_handle=0x%x len=%d ind=%d",
+        ESP_LOGD(TAG, "NOTIFY_RX: conn_handle=%d attr_handle=0x%x len=%d ind=%d",
                  conn_handle, attr_handle, data_len, event->notify_rx.indication);
 
         profile = get_profile_by_conn_id(conn_handle);
+        if (profile) {
+            profile->last_rx_us = esp_timer_get_time();
+        }
 
         if (s_notify_cb && profile) {
             uint8_t buf[512];
@@ -727,9 +878,28 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 
     /* ---------- Connection parameters updated ---------- */
     case BLE_GAP_EVENT_CONN_UPDATE:
-        ESP_LOGD(TAG, "Connection parameters updated: conn_handle=%d status=%d",
-                 event->conn_update.conn_handle, event->conn_update.status);
+        handle_conn_update(event->conn_update.conn_handle, event->conn_update.status);
         break;
+
+    /* ---------- LL connection parameter request from the camera ---------- */
+    case BLE_GAP_EVENT_CONN_UPDATE_REQ: {
+        /* self_params is writable and is what the controller answers with
+         * (ADR-021): accept the camera's values, but never below the floor */
+        const struct ble_gap_upd_params *peer = event->conn_update_req.peer_params;
+        struct ble_gap_upd_params *self = event->conn_update_req.self_params;
+        profile = get_profile_by_conn_id(event->conn_update_req.conn_handle);
+        ESP_LOGI(TAG, "Camera %d: LL param update req itvl=%u-%u latency=%u timeout=%u ms",
+                 profile ? profile->camera_index : -1,
+                 peer->itvl_min, peer->itvl_max, peer->latency,
+                 (unsigned)peer->supervision_timeout * 10);
+        if (self && self->supervision_timeout < BLE_SUPERVISION_TIMEOUT_FLOOR) {
+            self->supervision_timeout = BLE_SUPERVISION_TIMEOUT_FLOOR;
+            ESP_LOGI(TAG, "Camera %d: supervision timeout raised to %u ms",
+                     profile ? profile->camera_index : -1,
+                     (unsigned)BLE_SUPERVISION_TIMEOUT_FLOOR * 10);
+        }
+        return 0;
+    }
 
     /* ---------- Encryption change ---------- */
     case BLE_GAP_EVENT_ENC_CHANGE:
@@ -737,7 +907,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                  event->enc_change.conn_handle, event->enc_change.status);
         break;
 
-    /* ---------- L2CAP connection parameter update request from peripheral ---------- */
+    /* ---------- L2CAP connection parameter update request from peripheral ----------
+     * peer_params is const here and NimBLE applies exactly these values when
+     * we return 0. A timeout below the floor is corrected once per link after
+     * the update completes (handle_conn_update, ADR-021). */
     case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
         ESP_LOGI(TAG, "L2CAP param update req: conn_handle=%d itvl_min=%d itvl_max=%d "
                  "latency=%d timeout=%d",
@@ -978,7 +1151,7 @@ static void try_to_connect(int camera_index, const uint8_t *addr) {
     bda_reverse(addr, peer_addr.val);
 
     int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr, 30000,
-                              NULL, gap_event_cb, NULL);
+                              &s_conn_params, gap_event_cb, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Camera %d: ble_gap_connect failed: %d", camera_index, rc);
         s_connecting = false;
@@ -1077,7 +1250,7 @@ esp_err_t ble_connect_direct(int camera_index) {
     bda_reverse(p->target_mac, peer_addr.val);
 
     int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &peer_addr, 30000,
-                              NULL, gap_event_cb, NULL);
+                              &s_conn_params, gap_event_cb, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_connect_direct: ble_gap_connect failed for camera %d: %d",
                  camera_index, rc);
@@ -1140,9 +1313,15 @@ esp_err_t ble_write_without_response(uint16_t conn_id, uint16_t handle,
         ESP_LOGW(TAG, "Not connected or invalid conn_id, skip write_without_response");
         return ESP_FAIL;
     }
+    if (handle == 0) {
+        /* Discovery not finished; an ATT write to handle 0 can wedge the camera */
+        ESP_LOGW(TAG, "Camera %d: write_no_rsp to handle 0 refused", p->camera_index);
+        return ESP_ERR_INVALID_STATE;
+    }
 
     int rc = ble_gattc_write_no_rsp_flat(conn_id, handle, data, (uint16_t)length);
     if (rc != 0) {
+        count_gatt_failure(p->camera_index);
         ESP_LOGE(TAG, "Camera %d: write_no_rsp failed: %d", p->camera_index, rc);
         if (rc == BLE_HS_ENOTCONN || rc == BLE_HS_EDISABLED) {
             p->connection_status.is_connected = false;
@@ -1162,14 +1341,20 @@ esp_err_t ble_write_with_response(uint16_t conn_id, uint16_t handle,
         ESP_LOGW(TAG, "Not connected or invalid conn_id, skip write_with_response");
         return ESP_FAIL;
     }
+    if (handle == 0) {
+        /* Discovery not finished; an ATT write to handle 0 can wedge the camera */
+        ESP_LOGW(TAG, "Camera %d: write_rsp to handle 0 refused", p->camera_index);
+        return ESP_ERR_INVALID_STATE;
+    }
 
-    ESP_LOGI(TAG, "Camera %d: write_rsp conn=%d handle=0x%x len=%d",
+    ESP_LOGD(TAG, "Camera %d: write_rsp conn=%d handle=0x%x len=%d",
              p->camera_index, conn_id, handle, (int)length);
-    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length > 64 ? 64 : length, ESP_LOG_INFO);
+    ESP_LOG_BUFFER_HEX_LEVEL(TAG, data, length > 64 ? 64 : length, ESP_LOG_DEBUG);
 
     int rc = ble_gattc_write_flat(conn_id, handle, data, (uint16_t)length,
-                                   on_write_complete, NULL);
+                                   on_write_complete, (void *)(intptr_t)p->camera_index);
     if (rc != 0) {
+        count_gatt_failure(p->camera_index);
         ESP_LOGE(TAG, "Camera %d: write failed: %d", p->camera_index, rc);
         if (rc == BLE_HS_ENOTCONN || rc == BLE_HS_EDISABLED) {
             p->connection_status.is_connected = false;
@@ -1198,8 +1383,9 @@ esp_err_t ble_register_notify(uint16_t conn_id, uint16_t char_handle) {
              p->camera_index, p->cccd_handle, enable[0], enable[1]);
     int rc = ble_gattc_write_flat(conn_id, p->cccd_handle,
                                    enable, sizeof(enable),
-                                   on_write_complete, NULL);
+                                   on_write_complete, (void *)(intptr_t)p->camera_index);
     if (rc != 0) {
+        count_gatt_failure(p->camera_index);
         ESP_LOGE(TAG, "Camera %d: register_notify (CCCD write) failed: %d",
                  p->camera_index, rc);
         return ESP_FAIL;
@@ -1231,8 +1417,8 @@ void ble_set_notify_callback(ble_notify_callback_t cb) {
     s_notify_cb = cb;
 }
 
-void ble_set_state_callback(connect_logic_state_callback_t cb) {
-    s_state_cb = cb;
+void ble_set_link_event_callback(ble_link_event_callback_t cb) {
+    s_link_cb = cb;
 }
 
 /* ----------------------------------------------------------------
@@ -1426,6 +1612,34 @@ bool ble_is_camera_connected(int camera_index) {
     if (camera_index < 0 || camera_index >= BLE_MAX_CAMERAS) return false;
     ble_profile_t* p = get_profile_by_camera_index(camera_index);
     return p ? p->connection_status.is_connected : false;
+}
+
+bool ble_is_link_released(int camera_index) {
+    if (camera_index < 0 || camera_index >= BLE_MAX_CAMERAS) return true;
+    ble_profile_t* p = get_profile_by_camera_index(camera_index);
+    return p ? (p->conn_id == UINT16_MAX) : true;
+}
+
+esp_err_t ble_get_slot_diag(int camera_index, ble_slot_diag_t *out) {
+    if (!slot_in_range(camera_index) || out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const ble_profile_t *p = &s_ble_profiles[camera_index];
+
+    out->link_up = p->connection_status.is_connected;
+
+    int64_t last_rx = p->last_rx_us;  /* may tear on 32-bit; see ble.h */
+    if (last_rx > 0) {
+        int64_t age_us = esp_timer_get_time() - last_rx;
+        out->rx_age_ms = (age_us < 0) ? 0 : (uint32_t)MIN(age_us / 1000, (int64_t)(UINT32_MAX - 1));
+    } else {
+        out->rx_age_ms = UINT32_MAX;
+    }
+
+    out->supervision_ms   = (uint32_t)p->supervision_timeout * 10;
+    out->gatt_failures    = atomic_load(&s_gatt_failures[camera_index]);
+    out->last_disc_reason = s_last_disc_reason[camera_index];
+    return ESP_OK;
 }
 
 /* ----------------------------------------------------------------

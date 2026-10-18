@@ -37,6 +37,7 @@
 #include "status_logic.h"
 #include "enums_logic.h"
 #include "connect_logic.h"
+#include "command_worker.h"
 #include "data.h"
 #include "ble.h"
 #include "../gps/gps_reader.h"
@@ -192,10 +193,33 @@ static int g_settings_active_camera_index = 0;
 /* Mode Switch Screen state (slot index used by ui_switch_screen) */
 static int g_mode_switch_camera_index = 0;
 
-/* Wake state machine for reliable wake-and-record functionality */
-static wake_state_t g_wake_state = WAKE_STATE_IDLE;
-static uint32_t g_wake_broadcast_start_time = 0;  // Timestamp when wake broadcast started (milliseconds)
-static uint32_t g_wake_timeout_start_time = 0;     // Timestamp when waiting for confirmation started
+/* Slot whose Button A "Connect" hit an unresponsive link (ADR-019); handled
+ * after the LVGL lock is released: teardown, wait for release, reconnect */
+static int s_pending_unresponsive_reconnect = -1;
+
+/* Per slot: show the result of the submitted worker job as a message
+ * (single-slot actions) or only log it ("All Cameras", Mode Switch).
+ * Main task only. */
+static bool s_announce_result[NUM_CAMERAS];
+
+static esp_err_t ui_submit_job(int slot, cmd_job_t job, bool announce) {
+    esp_err_t ret = command_worker_submit(slot, job);
+    if (ret == ESP_OK) {
+        s_announce_result[slot] = announce;
+    }
+    return ret;
+}
+
+/* Non-blocking feedback for a submit: "Busy", "Not Connected" or ok_msg */
+static void post_submit_feedback(esp_err_t ret, const char *ok_msg, uint16_t ok_color) {
+    if (ret == ESP_OK) {
+        if (ok_msg) ui_post_shutter_message(ok_msg, ok_color, 1500);
+    } else if (ret == ESP_ERR_NOT_FINISHED) {
+        ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
+    } else {
+        ui_post_shutter_message("Not Connected", M5_COLOR_RED, 1500);
+    }
+}
 
 /* Wake-up queue for serialized wake broadcasts in "All Cameras" mode */
 wake_queue_t g_wake_queue = {0};
@@ -1022,18 +1046,8 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
             if (show_messages && !skip_intermediate_ui) {
                 ui_show_shutter_bottom_message("Protocol Failed", M5_COLOR_RED, 1500);
             }
-            g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-            g_camera_states[camera_index].is_connected = false;
-            if (g_camera_states[camera_index].snapshot_pending) {
-                ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (protocol connection failed)", camera_index);
-            }
-            g_camera_states[camera_index].snapshot_pending = false;
-            g_camera_states[camera_index].camera_supports_new_status_push = false;  // Reset 1D06 flag on disconnect
-            g_camera_states[camera_index].mode_name[0] = '\0';  // Clear mode_name
-            g_camera_states[camera_index].mode_param[0] = '\0';  // Clear mode_param
-            g_camera_states[camera_index].last_mode_name[0] = '\0';  // Clear last_mode_name
-            g_camera_states[camera_index].last_mode_param[0] = '\0';  // Clear last_mode_param
-            
+            connect_logic_reset_slot_link_state(camera_index);
+
             // Remove from wake queue if present
             if (g_current_wake_camera_index == camera_index) {
                 ESP_LOGW(TAG, "Camera %d disconnected during wake-up, clearing from queue", camera_index);
@@ -1054,18 +1068,13 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
         if (show_messages && !skip_intermediate_ui) {
             ui_show_shutter_bottom_message("BLE Failed", M5_COLOR_RED, 1500);
         }
-        g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-        g_camera_states[camera_index].is_connected = false;
-        if (g_camera_states[camera_index].snapshot_pending) {
-            ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (BLE connection failed)", camera_index);
-        }
-        g_camera_states[camera_index].snapshot_pending = false;
-        
+        connect_logic_reset_slot_link_state(camera_index);
+
         // Remove from wake queue if present
         if (g_current_wake_camera_index == camera_index) {
             ESP_LOGW(TAG, "Camera %d disconnected during wake-up, clearing from queue", camera_index);
             g_current_wake_camera_index = -1;
-                g_wake_queue_state = WAKE_QUEUE_IDLE;
+            g_wake_queue_state = WAKE_QUEUE_IDLE;
         }
         
         g_ui_state.display_needs_update = true;
@@ -1164,15 +1173,8 @@ static int ui_perform_boot_scan_connection(int camera_index) {
             return 0;
         } else {
             // Protocol connection failed - reset state
-            g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-            g_camera_states[camera_index].is_connected = false;
-            g_camera_states[camera_index].snapshot_pending = false;
-            g_camera_states[camera_index].camera_supports_new_status_push = false;
-            g_camera_states[camera_index].mode_name[0] = '\0';
-            g_camera_states[camera_index].mode_param[0] = '\0';
-            g_camera_states[camera_index].last_mode_name[0] = '\0';
-            g_camera_states[camera_index].last_mode_param[0] = '\0';
-            
+            connect_logic_reset_slot_link_state(camera_index);
+
             g_ui_state.display_needs_update = true;
             ui_update_display();
             
@@ -1180,10 +1182,8 @@ static int ui_perform_boot_scan_connection(int camera_index) {
         }
     } else {
         // BLE connection failed - reset state
-        g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-        g_camera_states[camera_index].is_connected = false;
-        g_camera_states[camera_index].snapshot_pending = false;
-        
+        connect_logic_reset_slot_link_state(camera_index);
+
         g_ui_state.display_needs_update = true;
         ui_update_display();
         
@@ -1260,7 +1260,7 @@ void ui_auto_connect_on_startup(void) {
     ESP_LOGI(TAG, "Starting auto-connect for all paired cameras");
     
     // Start single boot scan for all paired slots
-    // This will set connect_state to BLE_SEARCHING and show scanning_icon
+    // (the UI shows the scanning icon while connect_logic_is_boot_scan_active())
     int ret = connect_logic_start_boot_scan();
     if (ret != 0) {
         ESP_LOGI(TAG, "Boot scan not started (no paired slots or error)");
@@ -1270,64 +1270,6 @@ void ui_auto_connect_on_startup(void) {
     ESP_LOGI(TAG, "Boot scan started, waiting for cameras to be discovered...");
     // Note: Connection initiation will happen when connect_logic_update_boot_scan()
     // detects scan completion, which is called periodically from the main loop
-}
-
-/**
- * @brief Attempt background reconnection without UI messages
- * 
- * Public function for background reconnection attempts. This function
- * performs a complete reconnection (BLE + protocol) without showing
- * UI messages, making it suitable for periodic background attempts.
- * 
- * @return int 0 on success, -1 on failure or not needed
- */
-int ui_attempt_background_reconnection(void) {
-    /* Only attempt reconnection if we're disconnected but initialized */
-    connect_state_t current_state = connect_logic_get_state();
-    if (current_state >= BLE_SEARCHING) {
-        /* Already connected or connecting */
-        return 0;
-    }
-    
-    if (current_state < BLE_INIT_COMPLETE) {
-        /* BLE not initialized, cannot reconnect */
-        return -1;
-    }
-    
-    // Try to reconnect any paired but disconnected cameras
-    // Skip cameras that were not found during boot scan (they were likely turned off)
-    for (int i = 0; i < NUM_CAMERAS; i++) {
-        if (g_camera_states[i].is_paired && 
-            g_camera_states[i].connection_state == CAM_STATE_PAIRED_DISCONNECTED) {
-            
-            // Skip cameras that were not found during boot scan
-            // These cameras were likely turned off and shouldn't be reconnected automatically
-            extern bool connect_logic_was_slot_not_found_during_boot(int slot_index);
-            if (connect_logic_was_slot_not_found_during_boot(i)) {
-                ESP_LOGI(TAG, "Skipping background reconnection for camera %d (not found during boot scan)", i);
-                continue;
-            }
-            
-            ESP_LOGI(TAG, "Background reconnection attempt for camera %d", i);
-            
-            // For camera 0, also sync to old structure for compatibility
-            if (i == 0) {
-                g_stored_camera.is_paired = g_camera_states[0].is_paired;
-                strncpy(g_stored_camera.camera_name, g_camera_states[0].camera_name, sizeof(g_stored_camera.camera_name));
-                memcpy(g_stored_camera.camera_mac, g_camera_states[0].camera_mac, 6);
-                g_stored_camera.device_id = g_camera_states[0].device_id;
-                g_stored_camera.mac_addr_len = g_camera_states[0].mac_addr_len;
-                memcpy(g_stored_camera.mac_addr, g_camera_states[0].mac_addr, 6);
-                g_stored_camera.fw_version = g_camera_states[0].fw_version;
-                g_stored_camera.verify_data = g_camera_states[0].verify_data;
-                g_stored_camera.camera_reserved = g_camera_states[0].camera_reserved;
-            }
-            
-            return ui_perform_complete_reconnection(i, false);  /* No UI messages */
-        }
-    }
-    
-    return -1;  /* No cameras need reconnection */
 }
 
 static void ui_detect_device_and_set_scale(void);
@@ -1819,6 +1761,19 @@ static void ui_handle_settings_screen_button_a(void) {
     int active_slot = ui_screen_settings_get_camera_index();
     camera_state_t *cam = &g_camera_states[active_slot];
 
+    // Unresponsive slot (ADR-019): nothing may be sent, so Mode Switch and
+    // Sleep/Wakeup are refused. Connect and Unpair stay available.
+    if (cam->connection_state == CAM_STATE_UNRESPONSIVE &&
+        (sel == SETTINGS_ITEM_MODE_SWITCH || sel == SETTINGS_ITEM_SLEEP_WAKEUP)) {
+        ESP_LOGW(TAG, "Settings: camera %d not responding, action refused", active_slot);
+        ui_screen_settings_set_notification("Not responding", lv_color_make(255, 0, 0));
+        lvgl_port_unlock();
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        lvgl_port_lock(0);
+        ui_return_to_main_screen();
+        return;
+    }
+
     switch (sel) {
         case SETTINGS_ITEM_MODE_SWITCH:
             ESP_LOGI(TAG, "Settings: Mode Switch selected for camera %d", active_slot + 1);
@@ -1850,8 +1805,20 @@ static void ui_handle_settings_screen_button_a(void) {
                     lvgl_port_lock(0);
                 }
             } else {
+                // Sleep runs on the slot's worker (ADR-020); a failure is
+                // announced on the main screen when the result arrives
+                esp_err_t sub = ui_submit_job(active_slot, CMD_JOB_SLEEP, true);
+                if (sub != ESP_OK) {
+                    ui_screen_settings_set_notification(
+                        sub == ESP_ERR_NOT_FINISHED ? "Busy" : "Not connected",
+                        lv_color_make(255, 0, 0));
+                    lvgl_port_unlock();
+                    vTaskDelay(pdMS_TO_TICKS(1500));
+                    lvgl_port_lock(0);
+                    ui_return_to_main_screen();
+                    break;
+                }
                 ui_screen_settings_set_notification("Sleeping...", lv_color_make(0, 255, 255));
-                command_logic_power_mode_switch_sleep(active_slot);
                 lvgl_port_unlock();
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 lvgl_port_lock(0);
@@ -1868,16 +1835,37 @@ static void ui_handle_settings_screen_button_a(void) {
             if (cam->connection_state == CAM_STATE_CONNECTED) {
                 ESP_LOGI(TAG, "Settings: Disconnecting camera %d", active_slot);
                 ui_screen_settings_set_notification("Disconnecting...", lv_color_make(255, 255, 0));
-                ble_disconnect(active_slot);
-
-                cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-                cam->is_connected = false;
-                cam->is_initialized = false;
+                connect_logic_ble_disconnect(active_slot);
+                connect_logic_reset_slot_link_state(active_slot);
 
                 lvgl_port_unlock();
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 lvgl_port_lock(0);
                 ui_screen_settings_set_notification("Disconnected", lv_color_make(255, 255, 0));
+                lvgl_port_unlock();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                lvgl_port_lock(0);
+                ui_return_to_main_screen();
+            } else if (cam->connection_state == CAM_STATE_UNRESPONSIVE) {
+                ESP_LOGI(TAG, "Settings: Reconnecting unresponsive camera %d", active_slot);
+                ui_screen_settings_set_notification("Reconnecting...", lv_color_make(0, 0, 255));
+                connect_logic_set_slot_connecting(active_slot, true);
+                cam->connection_state = CAM_STATE_CONNECTING;
+                lvgl_port_unlock();
+
+                int result = -1;
+                if (connect_logic_teardown_and_wait(active_slot) == 0) {
+                    result = ui_perform_complete_reconnection(active_slot, true);
+                }
+
+                lvgl_port_lock(0);
+                if (result == 0) {
+                    ESP_LOGI(TAG, "Reconnection successful");
+                    ui_screen_settings_set_notification("Connected!", lv_color_make(0, 255, 0));
+                } else {
+                    ESP_LOGW(TAG, "Reconnection failed");
+                    ui_screen_settings_set_notification("Connection failed", lv_color_make(255, 0, 0));
+                }
                 lvgl_port_unlock();
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 lvgl_port_lock(0);
@@ -1909,10 +1897,14 @@ static void ui_handle_settings_screen_button_a(void) {
             if (cam->is_paired) {
                 ESP_LOGI(TAG, "Settings: Unpairing camera %d", active_slot);
 
-                if (cam->connection_state == CAM_STATE_CONNECTED) {
+                // Any open link (also an unresponsive one) is closed first
+                if (ble_is_camera_connected(active_slot)) {
                     ESP_LOGI(TAG, "Camera %d connected, disconnecting before unpairing", active_slot);
                     ui_screen_settings_set_notification("Disconnecting...", lv_color_make(255, 255, 0));
                     connect_logic_ble_disconnect(active_slot);
+                    // Leaves CONNECTED/UNRESPONSIVE under the watchdog lock
+                    // before the slot is wiped below
+                    connect_logic_reset_slot_link_state(active_slot);
                     lvgl_port_unlock();
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     lvgl_port_lock(0);
@@ -2048,6 +2040,31 @@ void ui_handle_button_a(void) {
     }
     lvgl_port_unlock();
 
+    // Deferred unresponsive reconnect (ADR-019). Checked before the regular
+    // deferred reconnect: the teardown resets is_connected, which would
+    // otherwise trigger that path too.
+    if (s_pending_unresponsive_reconnect >= 0) {
+        int cam_idx = s_pending_unresponsive_reconnect;
+        s_pending_unresponsive_reconnect = -1;
+        // Show the connecting icon now: the release wait can take up to
+        // LINK_RELEASE_WAIT_MAX_MS for a camera that is out of range
+        ui_update_display();
+        if (connect_logic_teardown_and_wait(cam_idx) == 0) {
+            int result = ui_perform_complete_reconnection(cam_idx, true);
+            ESP_LOGI(TAG, "Unresponsive reconnect for camera %d: %s",
+                     cam_idx, result == 0 ? "successful" : "failed");
+        } else {
+            ESP_LOGW(TAG, "Camera %d: link not released, reconnect aborted", cam_idx);
+            lvgl_port_lock(0);
+            ui_show_shutter_bottom_message("Reconnect failed", M5_COLOR_RED, 1500);
+            lvgl_port_unlock();
+        }
+        lvgl_port_lock(0);
+        g_ui_state.display_needs_update = true;
+        lvgl_port_unlock();
+        return;
+    }
+
     // Deferred reconnection: runs outside the LVGL lock so the display
     // can refresh to show "connecting" state during the blocking BLE call.
     if (g_ui_state.current_screen == SCREEN_MAIN &&
@@ -2151,15 +2168,8 @@ void ui_handle_button_c(void) {
             command_logic_slot_is_recording(cam_idx) &&
             command_logic_slot_supports_highlight(cam_idx)) {
             
-            // Send highlight tag command
-            esp_err_t ret = command_logic_send_highlight_for_slot(cam_idx);
-            if (ret == ESP_OK) {
-                // Show notification
-                ui_show_shutter_bottom_message("Highlight tag sent", M5_COLOR_GREEN, 1500);
-            } else {
-                // Show error notification
-                ui_show_shutter_bottom_message("Highlight failed", M5_COLOR_RED, 1500);
-            }
+            // Highlight tag on the slot's worker (ADR-020)
+            post_submit_feedback(ui_submit_job(cam_idx, CMD_JOB_HIGHLIGHT, true), NULL, 0);
             lvgl_port_unlock();
             return;
         }
@@ -2189,15 +2199,24 @@ void ui_handle_button_c(void) {
         }
         
         if (highlight_eligible_count > 0) {
-            // Highlight takes priority - send highlight to all eligible cameras
-            esp_err_t ret = command_logic_send_highlight_for_all_active();
-            if (ret == ESP_OK) {
-                // Show notification with count
+            // Highlight takes priority - one worker job per eligible slot
+            int submitted = 0;
+            for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (command_logic_slot_is_paired(i) &&
+                    command_logic_slot_is_connected(i) &&
+                    command_logic_slot_is_awake(i) &&
+                    command_logic_slot_is_recording(i) &&
+                    command_logic_slot_supports_highlight(i) &&
+                    ui_submit_job(i, CMD_JOB_HIGHLIGHT, false) == ESP_OK) {
+                    submitted++;
+                }
+            }
+            if (submitted > 0) {
                 char msg[32];
-                snprintf(msg, sizeof(msg), "Highlight sent to %d", highlight_eligible_count);
-                ui_show_shutter_bottom_message(msg, M5_COLOR_GREEN, 1500);
+                snprintf(msg, sizeof(msg), "Tag sent to %d", submitted);
+                ui_post_shutter_message(msg, M5_COLOR_GREEN, 1500);
             } else {
-                ui_show_shutter_bottom_message("Highlight failed", M5_COLOR_RED, 1500);
+                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
             }
             lvgl_port_unlock();
             return;
@@ -2217,28 +2236,19 @@ void ui_handle_button_c(void) {
             ESP_LOGI(TAG, "Button C: Sending sleep to %d cameras in All Cameras mode", sleep_candidates_count);
             int sent_count = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
-                if (is_camera_sleep_candidate(i)) {
-                    // Use the same sleep command as Settings screen
-                    camera_power_mode_switch_response_frame_t* response = 
-                        command_logic_power_mode_switch_sleep(i);
-                    if (response != NULL) {
-                        sent_count++;
-                        ESP_LOGI(TAG, "Sleep command sent to camera %d", i);
-                        // Free the response structure (allocated by send_command)
-                        free(response);
-                    } else {
-                        ESP_LOGW(TAG, "Sleep command failed for camera %d", i);
-                    }
+                if (is_camera_sleep_candidate(i) &&
+                    ui_submit_job(i, CMD_JOB_SLEEP, false) == ESP_OK) {
+                    sent_count++;
                 }
             }
-            
-            // Show notification with count
+
+            // Results arrive later and are only logged (ADR-020)
             if (sent_count > 0) {
                 char msg[32];
                 snprintf(msg, sizeof(msg), "Sleep sent to %d", sent_count);
-                ui_show_shutter_bottom_message(msg, M5_COLOR_GREEN, 1500);
+                ui_post_shutter_message(msg, M5_COLOR_GREEN, 1500);
             } else {
-                ui_show_shutter_bottom_message("Sleep failed", M5_COLOR_RED, 1500);
+                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
             }
             lvgl_port_unlock();
             return;
@@ -2350,17 +2360,24 @@ void ui_show_message(const char* message, uint16_t color, int duration_ms) {
  * @param color Text color (RGB565 format)
  * @param duration_ms Display duration in milliseconds
  */
+/* Maps the legacy RGB565 message colours to LVGL colours */
+static lv_color_t message_color(uint16_t color) {
+    if (color == M5_COLOR_RED)    return lv_color_make(255,   0,   0);
+    if (color == M5_COLOR_GREEN)  return lv_color_make(  0, 255,   0);
+    if (color == M5_COLOR_YELLOW) return lv_color_make(255, 255,   0);
+    if (color == M5_COLOR_BLUE)   return lv_color_make(  0,   0, 255);
+    if (color == M5_COLOR_CYAN)   return lv_color_make(  0, 255, 255);
+    if (color == M5_COLOR_ORANGE) return lv_color_make(255, 165,   0);
+    return lv_color_white();
+}
+
 void ui_show_shutter_bottom_message(const char* message, uint16_t color, int duration_ms) {
-    lv_color_t lv_clr = lv_color_white();
-    if (color == M5_COLOR_RED)         lv_clr = lv_color_make(255,   0,   0);
-    else if (color == M5_COLOR_GREEN)  lv_clr = lv_color_make(  0, 255,   0);
-    else if (color == M5_COLOR_YELLOW) lv_clr = lv_color_make(255, 255,   0);
-    else if (color == M5_COLOR_BLUE)   lv_clr = lv_color_make(  0,   0, 255);
-    else if (color == M5_COLOR_CYAN)   lv_clr = lv_color_make(  0, 255, 255);
-    else if (color == M5_COLOR_ORANGE) lv_clr = lv_color_make(255, 165,   0);
+    lv_color_t lv_clr = message_color(color);
 
     if (g_ui_state.current_screen == SCREEN_MAIN && ui_screen_main_is_created()) {
         lvgl_port_lock(0);
+        /* A pending posted message must not clear this one early */
+        ui_screen_main_cancel_notification_timer();
         ui_screen_main_set_notification(message, lv_clr);
         lvgl_port_unlock();
 
@@ -2375,6 +2392,22 @@ void ui_show_shutter_bottom_message(const char* message, uint16_t color, int dur
     /* Non-main screens: just delay (the LVGL screen will refresh naturally) */
     ESP_LOGI(TAG, "Notification (screen %d): %s", g_ui_state.current_screen, message);
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
+}
+
+/**
+ * @brief Non-blocking variant of ui_show_shutter_bottom_message()
+ *
+ * Posts the message and returns at once; an LVGL timer clears it. On other
+ * screens the message is only logged.
+ */
+void ui_post_shutter_message(const char *message, uint16_t color, uint32_t duration_ms) {
+    lvgl_port_lock(0);
+    if (g_ui_state.current_screen == SCREEN_MAIN && ui_screen_main_is_created()) {
+        ui_screen_main_post_notification(message, message_color(color), duration_ms);
+    } else {
+        ESP_LOGI(TAG, "Notification (screen %d): %s", g_ui_state.current_screen, message);
+    }
+    lvgl_port_unlock();
 }
 
 /**
@@ -2415,6 +2448,8 @@ void ui_screen_main(void) {
         // "All cameras" mode - control all connected cameras
         ESP_LOGI(TAG, "All cameras mode - controlling all connected cameras");
         
+        // Only CAM_STATE_CONNECTED slots take part; unresponsive slots are
+        // skipped by these checks (ADR-019)
         // Determine if any connected camera is recording
         bool any_recording = false;
         for (int i = 0; i < NUM_CAMERAS; i++) {
@@ -2429,21 +2464,32 @@ void ui_screen_main(void) {
         if (any_recording) {
             // Stop all connected cameras that are recording
             ESP_LOGI(TAG, "Stopping all recording cameras (synchronized)");
+            // One async job per slot; the workers run in parallel, so the
+            // stops stay close together (ADR-020)
             int cameras_stopped = 0;
+            int cameras_busy = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
                 if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
-                    ESP_LOGI(TAG, "Sending stop command to camera %d (non-blocking)", i);
-                    command_logic_stop_record_async(i);
-                    cameras_stopped++;
+                    esp_err_t ret = ui_submit_job(i, CMD_JOB_RECORD_STOP_ASYNC, false);
+                    if (ret == ESP_OK) {
+                        cameras_stopped++;
+                    } else if (ret == ESP_ERR_NOT_FINISHED) {
+                        cameras_busy++;
+                    }
                 }
             }
-            ESP_LOGI(TAG, "Sent stop commands to %d cameras (commands sent back-to-back for better sync)", cameras_stopped);
-            ui_show_shutter_bottom_message("Stopping All", M5_COLOR_YELLOW, 1000);
+            ESP_LOGI(TAG, "Stop jobs submitted: %d (busy: %d)", cameras_stopped, cameras_busy);
+            if (cameras_stopped > 0) {
+                ui_post_shutter_message("Stopping All", M5_COLOR_YELLOW, 1000);
+            } else {
+                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
+            }
         } else {
             // Start all connected cameras (awake cameras get recording command, sleeping cameras queued for snapshot)
             ESP_LOGI(TAG, "Starting all connected cameras (synchronized)");
             int cameras_started = 0;
             int cameras_queued = 0;
+            int cameras_busy = 0;
             
             // First pass: Process all non-sleeping cameras immediately
             for (int i = 0; i < NUM_CAMERAS; i++) {
@@ -2458,10 +2504,13 @@ void ui_screen_main(void) {
                 bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
                 
                 if (!is_sleeping) {
-                    // Camera is awake - send normal start recording command
-                    ESP_LOGI(TAG, "Sending start command to camera %d (non-blocking)", i);
-                    command_logic_start_record_async(i);
-                    cameras_started++;
+                    // Camera is awake - async start job on its worker (ADR-020)
+                    esp_err_t ret = ui_submit_job(i, CMD_JOB_RECORD_START_ASYNC, false);
+                    if (ret == ESP_OK) {
+                        cameras_started++;
+                    } else if (ret == ESP_ERR_NOT_FINISHED) {
+                        cameras_busy++;
+                    }
                 }
             }
             
@@ -2505,20 +2554,23 @@ void ui_screen_main(void) {
                 ESP_LOGI(TAG, "Wake queue has %d camera(s), starting serialized wake-up processing", wake_queue_get_count());
             }
             
-            // Show appropriate notification
+            // Show appropriate notification (non-blocking)
+            ESP_LOGI(TAG, "Start jobs submitted: %d, queued for wake: %d, busy: %d",
+                     cameras_started, cameras_queued, cameras_busy);
             if (cameras_queued > 0 && cameras_started > 0) {
                 char msg[48];
                 snprintf(msg, sizeof(msg), "Starting %d, Queued %d", cameras_started, cameras_queued);
-                ui_show_shutter_bottom_message(msg, M5_COLOR_GREEN, 1500);
+                ui_post_shutter_message(msg, M5_COLOR_GREEN, 1500);
             } else if (cameras_queued > 0) {
                 char msg[32];
                 snprintf(msg, sizeof(msg), "Queued %d camera(s)", cameras_queued);
-                ui_show_shutter_bottom_message(msg, M5_COLOR_YELLOW, 1500);
+                ui_post_shutter_message(msg, M5_COLOR_YELLOW, 1500);
             } else if (cameras_started > 0) {
-                ESP_LOGI(TAG, "Sent start commands to %d cameras (commands sent back-to-back for better sync)", cameras_started);
-                ui_show_shutter_bottom_message("Starting All", M5_COLOR_GREEN, 1000);
+                ui_post_shutter_message("Starting All", M5_COLOR_GREEN, 1000);
+            } else if (cameras_busy > 0) {
+                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
             } else {
-                ui_show_shutter_bottom_message("No cameras ready", M5_COLOR_ORANGE, 1000);
+                ui_post_shutter_message("No cameras ready", M5_COLOR_ORANGE, 1000);
             }
         }
         return;
@@ -2537,6 +2589,16 @@ void ui_screen_main(void) {
     
     // Check if this camera is connected
     if (g_camera_states[cam_idx].connection_state != CAM_STATE_CONNECTED) {
+        // Unresponsive link (ADR-019): tear down and reconnect after lock release.
+        // The connecting flag goes first so the watchdog leaves the slot alone.
+        if (g_camera_states[cam_idx].connection_state == CAM_STATE_UNRESPONSIVE) {
+            ESP_LOGI(TAG, "Camera %d is unresponsive - scheduling teardown and reconnect", cam_idx);
+            connect_logic_set_slot_connecting(cam_idx, true);
+            g_camera_states[cam_idx].connection_state = CAM_STATE_CONNECTING;
+            s_pending_unresponsive_reconnect = cam_idx;
+            g_ui_state.display_needs_update = true;
+            return;
+        }
         // Camera is paired but not connected - mark as connecting and defer to after lock release
         if (g_camera_states[cam_idx].connection_state == CAM_STATE_PAIRED_DISCONNECTED || 
             g_camera_states[cam_idx].connection_state == CAM_STATE_CONNECTING) {
@@ -2608,7 +2670,7 @@ void ui_screen_main(void) {
     /* Check if camera status has been received for mode-aware operation */
     if (!cam_state->is_initialized) {
         ESP_LOGW(TAG, "Camera %d status not yet initialized, attempting command anyway", cam_idx);
-        ui_show_shutter_bottom_message("Status Unknown\nTrying...", M5_COLOR_ORANGE, 1000);
+        ui_post_shutter_message("Status Unknown\nTrying...", M5_COLOR_ORANGE, 1000);
     }
     
     /* Determine shutter behavior based on current camera mode */
@@ -2617,137 +2679,21 @@ void ui_screen_main(void) {
     ESP_LOGI(TAG, "Current camera mode: %d, status: %d, recording: %s", 
              current_mode, cam_state->camera_status, cam_state->is_recording ? "yes" : "no");
     
+    /* The command runs on the slot's worker; the result message is posted
+     * by ui_process_command_results() (ADR-020). Photo mode uses the same
+     * record-start command. */
+    cmd_job_t job;
     if (current_mode == CAMERA_MODE_PHOTO) {
-        /* Photo mode - single shot capture */
         ESP_LOGI(TAG, "Taking photo in photo mode");
-        record_control_response_frame_t* response = command_logic_start_record(cam_idx);
-        if (response) {
-            ui_show_shutter_bottom_message("Photo Taken", M5_COLOR_GREEN, 1000);
-            free(response);
-        } else {
-            ui_show_shutter_bottom_message("Photo Failed", M5_COLOR_RED, 1500);
-        }
+        job = CMD_JOB_RECORD_START;
+    } else if (cam_state->is_recording) {
+        ESP_LOGI(TAG, "Stopping recording in video mode");
+        job = CMD_JOB_RECORD_STOP;
     } else {
-        /* Video modes - toggle recording state */
-        bool is_recording = cam_state->is_recording;
-        
-        if (is_recording) {
-            /* Stop current recording */
-            ESP_LOGI(TAG, "Stopping recording in video mode");
-            record_control_response_frame_t* response = command_logic_stop_record(cam_idx);
-            if (response) {
-                ui_show_shutter_bottom_message("Recording Stopped", M5_COLOR_YELLOW, 1000);
-                free(response);
-            } else {
-                ui_show_shutter_bottom_message("Stop Failed", M5_COLOR_RED, 1500);
-            }
-        } else {
-            /* Start new recording */
-            ESP_LOGI(TAG, "Starting recording in video mode");
-            record_control_response_frame_t* response = command_logic_start_record(cam_idx);
-            if (response) {
-                ui_show_shutter_bottom_message("Recording Started", M5_COLOR_GREEN, 1000);
-                free(response);
-            } else {
-                ui_show_shutter_bottom_message("Start Failed", M5_COLOR_RED, 1500);
-            }
-        }
+        ESP_LOGI(TAG, "Starting recording in video mode");
+        job = CMD_JOB_RECORD_START;
     }
-}
-
-/**
- * @brief Process wake-and-record state machine
- * 
- * This function manages the wake-and-record state machine and should be called
- * from the main loop every cycle. It handles the timing and confirmation logic
- * for waking up a sleeping camera and starting recording after confirmation.
- * 
- * State Machine:
- * - WAKE_STATE_IDLE: No wake-up in progress
- * - WAKE_STATE_BROADCASTING: Broadcasting wake packet for 2 seconds
- * - WAKE_STATE_WAITING_CONFIRMATION: Waiting for camera status updates to confirm wake
- * - WAKE_STATE_READY: Camera confirmed awake, send recording command
- * 
- * Called from main loop in app_main.c
- */
-void ui_process_wake_and_record(void) {
-    // Only process if we're not in IDLE state
-    if (g_wake_state == WAKE_STATE_IDLE) {
-        return;
-    }
-    
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    
-    switch (g_wake_state) {
-        case WAKE_STATE_BROADCASTING:
-            // Wait for 3-second broadcast to complete (increased from 2s for reliability)
-            if (current_time - g_wake_broadcast_start_time >= 3000) {
-                ESP_LOGI(TAG, "Wake broadcast completed (3s elapsed), waiting for camera confirmation");
-                g_wake_state = WAKE_STATE_WAITING_CONFIRMATION;
-                g_wake_timeout_start_time = current_time;
-            }
-            break;
-            
-        case WAKE_STATE_WAITING_CONFIRMATION:
-            // Check if camera has woken up (power_mode changed from 3 to 0)
-            if (current_power_mode != 3) {
-                // Camera is no longer in sleep mode
-                // Verify camera is actively communicating (status push is recent)
-                uint32_t status_age = current_time - g_last_status_push_timestamp;
-                
-                if (status_age < 1000) {
-                    // Status push is fresh (< 1 second old), camera is confirmed awake
-                    ESP_LOGI(TAG, "Camera wake confirmed (power_mode=%d, status_age=%lu ms), ready to send recording command",
-                             current_power_mode, status_age);
-                    g_wake_state = WAKE_STATE_READY;
-                } else {
-                    // Status push is stale, keep waiting
-                    ESP_LOGD(TAG, "Camera reports awake but status push is stale (%lu ms), waiting for fresh status",
-                             status_age);
-                }
-            }
-            
-            // Check for timeout (6 seconds total: 3s broadcast + 3s confirmation)
-            if (current_time - g_wake_broadcast_start_time >= 6000) {
-                ESP_LOGW(TAG, "Wake-and-record timeout (6s elapsed), camera did not respond");
-                ui_show_shutter_bottom_message("Wake Timeout", M5_COLOR_RED, 2000);
-                g_wake_state = WAKE_STATE_IDLE;
-                g_camera_states[0].pending_start_recording = false;
-            }
-            break;
-            
-        case WAKE_STATE_READY:
-            // Camera is confirmed awake, send recording command
-            if (g_camera_states[0].pending_start_recording) {
-                ESP_LOGI(TAG, "Sending start recording command after wake-up for camera 0");
-                
-                record_control_response_frame_t* response = command_logic_start_record(0);
-                if (response) {
-                    ESP_LOGI(TAG, "Recording command sent successfully after wake-up");
-                    ui_show_shutter_bottom_message("Recording Started", M5_COLOR_GREEN, 1000);
-                    free(response);
-                } else {
-                    ESP_LOGE(TAG, "Failed to send recording command after wake-up");
-                    ui_show_shutter_bottom_message("Start Failed", M5_COLOR_RED, 1500);
-                }
-                
-                // Clear pending flag and reset state
-                g_camera_states[0].pending_start_recording = false;
-                g_wake_state = WAKE_STATE_IDLE;
-                g_ui_state.display_needs_update = true;
-            } else {
-                // Shouldn't happen, but handle gracefully
-                ESP_LOGW(TAG, "Wake state READY but no pending recording, resetting to IDLE");
-                g_wake_state = WAKE_STATE_IDLE;
-            }
-            break;
-            
-        default:
-            // Invalid state, reset to IDLE
-            ESP_LOGW(TAG, "Invalid wake state %d, resetting to IDLE", g_wake_state);
-            g_wake_state = WAKE_STATE_IDLE;
-            break;
-    }
+    post_submit_feedback(ui_submit_job(cam_idx, job, true), NULL, 0);
 }
 
 /* ================== Wake-Up Queue Management ================== */
@@ -2826,6 +2772,121 @@ void wake_queue_clear(void) {
     g_wake_queue.queue_active = false;
     g_current_wake_camera_index = -1;
     ESP_LOGI(TAG, "Wake queue cleared");
+}
+
+/**
+ * @brief Remove one slot from the wake-up queue
+ *
+ * Rebuilds the ring buffer without @p slot, keeping the order of the others.
+ * Main task only.
+ *
+ * @return true if the slot was queued and has been removed
+ */
+bool wake_queue_remove(int slot) {
+    int kept[NUM_CAMERAS];
+    int kept_count = 0;
+    bool removed = false;
+
+    for (int i = 0; i < g_wake_queue.queue_count; i++) {
+        int idx = (g_wake_queue.queue_head + i) % NUM_CAMERAS;
+        int cam = g_wake_queue.camera_indices[idx];
+        if (cam == slot) {
+            removed = true;
+        } else {
+            kept[kept_count++] = cam;
+        }
+    }
+
+    if (!removed) {
+        return false;
+    }
+
+    for (int i = 0; i < kept_count; i++) {
+        g_wake_queue.camera_indices[i] = kept[i];
+    }
+    g_wake_queue.queue_head = 0;
+    g_wake_queue.queue_tail = kept_count % NUM_CAMERAS;
+    g_wake_queue.queue_count = kept_count;
+    ESP_LOGI(TAG, "Camera %d removed from wake queue (link lost, remaining: %d)", slot, kept_count);
+    return true;
+}
+
+/**
+ * @brief Main-loop cleanup for slots that lost their link (ADR-018)
+ *
+ * Consumes the per-slot "link lost" flags set by link_evt_task. Stops a wake
+ * broadcast aimed at the dropped slot and removes it from the wake queue so
+ * "All Cameras" continues with the remaining slots. Does not touch LVGL.
+ */
+/**
+ * @brief Show results of worker jobs (main loop, ADR-020)
+ *
+ * Single-slot jobs get a non-blocking message; "All Cameras" and Mode
+ * Switch jobs are only logged (their summary was posted at submit). Photo
+ * vs. recording is decided by the camera mode at result time.
+ */
+void ui_process_command_results(void) {
+    cmd_result_t r;
+    while (command_worker_take_result(&r)) {
+        if (r.slot < 0 || r.slot >= NUM_CAMERAS) continue;
+
+        /* ret_code -1: job without response frame */
+        bool ok = (r.status == ESP_OK) && (r.ret_code == 0 || r.ret_code == -1);
+        bool announce = s_announce_result[r.slot];
+        s_announce_result[r.slot] = false;
+
+        if (!announce) {
+            ESP_LOGI(TAG, "Camera %d: %s result %s (ret_code=%d)", r.slot,
+                     command_worker_job_name(r.job), ok ? "ok" : "failed", r.ret_code);
+            g_ui_state.display_needs_update = true;
+            continue;
+        }
+
+        bool photo = (g_camera_states[r.slot].camera_mode == CAMERA_MODE_PHOTO);
+        switch (r.job) {
+            case CMD_JOB_RECORD_START:
+                if (photo) {
+                    ui_post_shutter_message(ok ? "Photo Taken" : "Photo Failed",
+                                            ok ? M5_COLOR_GREEN : M5_COLOR_RED, ok ? 1000 : 1500);
+                } else {
+                    ui_post_shutter_message(ok ? "Recording Started" : "Start Failed",
+                                            ok ? M5_COLOR_GREEN : M5_COLOR_RED, ok ? 1000 : 1500);
+                }
+                break;
+            case CMD_JOB_RECORD_STOP:
+                ui_post_shutter_message(ok ? "Recording Stopped" : "Stop Failed",
+                                        ok ? M5_COLOR_YELLOW : M5_COLOR_RED, ok ? 1000 : 1500);
+                break;
+            case CMD_JOB_HIGHLIGHT:
+                ui_post_shutter_message(ok ? "Highlight tag sent" : "Highlight failed",
+                                        ok ? M5_COLOR_GREEN : M5_COLOR_RED, 1500);
+                break;
+            case CMD_JOB_SLEEP:
+                if (!ok) ui_post_shutter_message("Sleep failed", M5_COLOR_RED, 1500);
+                break;
+            default:
+                break;
+        }
+        g_ui_state.display_needs_update = true;
+    }
+}
+
+void ui_process_link_events(void) {
+    for (int slot = 0; slot < NUM_CAMERAS; slot++) {
+        if (!connect_logic_take_link_lost(slot)) {
+            continue;
+        }
+
+        if (g_current_wake_camera_index == slot) {
+            ESP_LOGW(TAG, "Camera %d lost its link during wake-up, stopping broadcast", slot);
+            ble_stop_advertising_early();
+            g_current_wake_camera_index = -1;
+            g_wake_queue_state = WAKE_QUEUE_IDLE;
+        }
+
+        wake_queue_remove(slot);
+        g_ui_state.display_needs_update = true;
+    }
 }
 
 /**

@@ -82,3 +82,7 @@ CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_14=y
+
+# Logging: compile ESP_LOGD in so DEBUG can be enabled per tag at runtime
+# (log_config.c). The default runtime level is set by APP_DEFAULT_LOG_LEVEL.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

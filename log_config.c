@@ -45,6 +45,18 @@ void app_log_set_level(app_log_level_t level) {
     
     /* Apply globally to all tags using wildcard "*" */
     esp_log_level_set("*", esp_level);
+
+    /* Per-tag overrides must come after the "*" call, which resets every
+     * tag to the new default level */
+    if (esp_level >= ESP_LOG_INFO) {
+        /* NimBLE logs every GATT procedure at INFO (10 Hz GPS per camera).
+         * The Kconfig NimBLE level stays INFO so this filter can be lifted
+         * for stack debugging. */
+        esp_log_level_set(APP_LOG_TAG_NIMBLE, ESP_LOG_WARN);
+    }
+#if APP_BLE_DIAG_LOG
+    esp_log_level_set(APP_LOG_TAG_BLE_DIAG, ESP_LOG_DEBUG);
+#endif
 }
 
 app_log_level_t app_log_get_level(void) {

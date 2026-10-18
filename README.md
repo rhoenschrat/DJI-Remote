@@ -71,6 +71,7 @@ DJI-Remote significantly extends the concept with:
 | [`docs/manual.md`](docs/manual.md) | **User Manual** – How to operate the remote |
 | [`docs/implementation.md`](docs/implementation.md) | **Developer Documentation** – Firmware architecture and internals |
 | [`docs/hardware-waveshare-s3-lcd19.md`](docs/hardware-waveshare-s3-lcd19.md) | **Hardware Reference** – Waveshare ESP32-S3-LCD-1.9 pin assignments and wiring |
+| [`tools/diag/README.md`](tools/diag/README.md) | **Fault Diagnostics** – Read the connection faults and restarts recorded by the remote over USB |
 | [`CHANGELOG.md`](CHANGELOG.md) | **Changelog** – Full version history |
 | [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) | Licenses for DJI, ESP-IDF, LVGL, NimBLE and other external code |
 | [`LICENSE`](LICENSE) | MIT license for this project |
