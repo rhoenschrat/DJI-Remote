@@ -192,11 +192,6 @@ static int g_settings_active_camera_index = 0;
 /* Mode Switch Screen state (slot index used by ui_switch_screen) */
 static int g_mode_switch_camera_index = 0;
 
-/* Wake state machine for reliable wake-and-record functionality */
-static wake_state_t g_wake_state = WAKE_STATE_IDLE;
-static uint32_t g_wake_broadcast_start_time = 0;  // Timestamp when wake broadcast started (milliseconds)
-static uint32_t g_wake_timeout_start_time = 0;     // Timestamp when waiting for confirmation started
-
 /* Wake-up queue for serialized wake broadcasts in "All Cameras" mode */
 wake_queue_t g_wake_queue = {0};
 wake_queue_state_t g_wake_queue_state = WAKE_QUEUE_IDLE;
@@ -1022,18 +1017,8 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
             if (show_messages && !skip_intermediate_ui) {
                 ui_show_shutter_bottom_message("Protocol Failed", M5_COLOR_RED, 1500);
             }
-            g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-            g_camera_states[camera_index].is_connected = false;
-            if (g_camera_states[camera_index].snapshot_pending) {
-                ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (protocol connection failed)", camera_index);
-            }
-            g_camera_states[camera_index].snapshot_pending = false;
-            g_camera_states[camera_index].camera_supports_new_status_push = false;  // Reset 1D06 flag on disconnect
-            g_camera_states[camera_index].mode_name[0] = '\0';  // Clear mode_name
-            g_camera_states[camera_index].mode_param[0] = '\0';  // Clear mode_param
-            g_camera_states[camera_index].last_mode_name[0] = '\0';  // Clear last_mode_name
-            g_camera_states[camera_index].last_mode_param[0] = '\0';  // Clear last_mode_param
-            
+            connect_logic_reset_slot_link_state(camera_index);
+
             // Remove from wake queue if present
             if (g_current_wake_camera_index == camera_index) {
                 ESP_LOGW(TAG, "Camera %d disconnected during wake-up, clearing from queue", camera_index);
@@ -1054,18 +1039,13 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
         if (show_messages && !skip_intermediate_ui) {
             ui_show_shutter_bottom_message("BLE Failed", M5_COLOR_RED, 1500);
         }
-        g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-        g_camera_states[camera_index].is_connected = false;
-        if (g_camera_states[camera_index].snapshot_pending) {
-            ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (BLE connection failed)", camera_index);
-        }
-        g_camera_states[camera_index].snapshot_pending = false;
-        
+        connect_logic_reset_slot_link_state(camera_index);
+
         // Remove from wake queue if present
         if (g_current_wake_camera_index == camera_index) {
             ESP_LOGW(TAG, "Camera %d disconnected during wake-up, clearing from queue", camera_index);
             g_current_wake_camera_index = -1;
-                g_wake_queue_state = WAKE_QUEUE_IDLE;
+            g_wake_queue_state = WAKE_QUEUE_IDLE;
         }
         
         g_ui_state.display_needs_update = true;
@@ -1164,15 +1144,8 @@ static int ui_perform_boot_scan_connection(int camera_index) {
             return 0;
         } else {
             // Protocol connection failed - reset state
-            g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-            g_camera_states[camera_index].is_connected = false;
-            g_camera_states[camera_index].snapshot_pending = false;
-            g_camera_states[camera_index].camera_supports_new_status_push = false;
-            g_camera_states[camera_index].mode_name[0] = '\0';
-            g_camera_states[camera_index].mode_param[0] = '\0';
-            g_camera_states[camera_index].last_mode_name[0] = '\0';
-            g_camera_states[camera_index].last_mode_param[0] = '\0';
-            
+            connect_logic_reset_slot_link_state(camera_index);
+
             g_ui_state.display_needs_update = true;
             ui_update_display();
             
@@ -1180,10 +1153,8 @@ static int ui_perform_boot_scan_connection(int camera_index) {
         }
     } else {
         // BLE connection failed - reset state
-        g_camera_states[camera_index].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-        g_camera_states[camera_index].is_connected = false;
-        g_camera_states[camera_index].snapshot_pending = false;
-        
+        connect_logic_reset_slot_link_state(camera_index);
+
         g_ui_state.display_needs_update = true;
         ui_update_display();
         
@@ -1260,7 +1231,7 @@ void ui_auto_connect_on_startup(void) {
     ESP_LOGI(TAG, "Starting auto-connect for all paired cameras");
     
     // Start single boot scan for all paired slots
-    // This will set connect_state to BLE_SEARCHING and show scanning_icon
+    // (the UI shows the scanning icon while connect_logic_is_boot_scan_active())
     int ret = connect_logic_start_boot_scan();
     if (ret != 0) {
         ESP_LOGI(TAG, "Boot scan not started (no paired slots or error)");
@@ -1270,64 +1241,6 @@ void ui_auto_connect_on_startup(void) {
     ESP_LOGI(TAG, "Boot scan started, waiting for cameras to be discovered...");
     // Note: Connection initiation will happen when connect_logic_update_boot_scan()
     // detects scan completion, which is called periodically from the main loop
-}
-
-/**
- * @brief Attempt background reconnection without UI messages
- * 
- * Public function for background reconnection attempts. This function
- * performs a complete reconnection (BLE + protocol) without showing
- * UI messages, making it suitable for periodic background attempts.
- * 
- * @return int 0 on success, -1 on failure or not needed
- */
-int ui_attempt_background_reconnection(void) {
-    /* Only attempt reconnection if we're disconnected but initialized */
-    connect_state_t current_state = connect_logic_get_state();
-    if (current_state >= BLE_SEARCHING) {
-        /* Already connected or connecting */
-        return 0;
-    }
-    
-    if (current_state < BLE_INIT_COMPLETE) {
-        /* BLE not initialized, cannot reconnect */
-        return -1;
-    }
-    
-    // Try to reconnect any paired but disconnected cameras
-    // Skip cameras that were not found during boot scan (they were likely turned off)
-    for (int i = 0; i < NUM_CAMERAS; i++) {
-        if (g_camera_states[i].is_paired && 
-            g_camera_states[i].connection_state == CAM_STATE_PAIRED_DISCONNECTED) {
-            
-            // Skip cameras that were not found during boot scan
-            // These cameras were likely turned off and shouldn't be reconnected automatically
-            extern bool connect_logic_was_slot_not_found_during_boot(int slot_index);
-            if (connect_logic_was_slot_not_found_during_boot(i)) {
-                ESP_LOGI(TAG, "Skipping background reconnection for camera %d (not found during boot scan)", i);
-                continue;
-            }
-            
-            ESP_LOGI(TAG, "Background reconnection attempt for camera %d", i);
-            
-            // For camera 0, also sync to old structure for compatibility
-            if (i == 0) {
-                g_stored_camera.is_paired = g_camera_states[0].is_paired;
-                strncpy(g_stored_camera.camera_name, g_camera_states[0].camera_name, sizeof(g_stored_camera.camera_name));
-                memcpy(g_stored_camera.camera_mac, g_camera_states[0].camera_mac, 6);
-                g_stored_camera.device_id = g_camera_states[0].device_id;
-                g_stored_camera.mac_addr_len = g_camera_states[0].mac_addr_len;
-                memcpy(g_stored_camera.mac_addr, g_camera_states[0].mac_addr, 6);
-                g_stored_camera.fw_version = g_camera_states[0].fw_version;
-                g_stored_camera.verify_data = g_camera_states[0].verify_data;
-                g_stored_camera.camera_reserved = g_camera_states[0].camera_reserved;
-            }
-            
-            return ui_perform_complete_reconnection(i, false);  /* No UI messages */
-        }
-    }
-    
-    return -1;  /* No cameras need reconnection */
 }
 
 static void ui_detect_device_and_set_scale(void);
@@ -1868,11 +1781,8 @@ static void ui_handle_settings_screen_button_a(void) {
             if (cam->connection_state == CAM_STATE_CONNECTED) {
                 ESP_LOGI(TAG, "Settings: Disconnecting camera %d", active_slot);
                 ui_screen_settings_set_notification("Disconnecting...", lv_color_make(255, 255, 0));
-                ble_disconnect(active_slot);
-
-                cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-                cam->is_connected = false;
-                cam->is_initialized = false;
+                connect_logic_ble_disconnect(active_slot);
+                connect_logic_reset_slot_link_state(active_slot);
 
                 lvgl_port_unlock();
                 vTaskDelay(pdMS_TO_TICKS(1000));
@@ -2655,101 +2565,6 @@ void ui_screen_main(void) {
     }
 }
 
-/**
- * @brief Process wake-and-record state machine
- * 
- * This function manages the wake-and-record state machine and should be called
- * from the main loop every cycle. It handles the timing and confirmation logic
- * for waking up a sleeping camera and starting recording after confirmation.
- * 
- * State Machine:
- * - WAKE_STATE_IDLE: No wake-up in progress
- * - WAKE_STATE_BROADCASTING: Broadcasting wake packet for 2 seconds
- * - WAKE_STATE_WAITING_CONFIRMATION: Waiting for camera status updates to confirm wake
- * - WAKE_STATE_READY: Camera confirmed awake, send recording command
- * 
- * Called from main loop in app_main.c
- */
-void ui_process_wake_and_record(void) {
-    // Only process if we're not in IDLE state
-    if (g_wake_state == WAKE_STATE_IDLE) {
-        return;
-    }
-    
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-    
-    switch (g_wake_state) {
-        case WAKE_STATE_BROADCASTING:
-            // Wait for 3-second broadcast to complete (increased from 2s for reliability)
-            if (current_time - g_wake_broadcast_start_time >= 3000) {
-                ESP_LOGI(TAG, "Wake broadcast completed (3s elapsed), waiting for camera confirmation");
-                g_wake_state = WAKE_STATE_WAITING_CONFIRMATION;
-                g_wake_timeout_start_time = current_time;
-            }
-            break;
-            
-        case WAKE_STATE_WAITING_CONFIRMATION:
-            // Check if camera has woken up (power_mode changed from 3 to 0)
-            if (current_power_mode != 3) {
-                // Camera is no longer in sleep mode
-                // Verify camera is actively communicating (status push is recent)
-                uint32_t status_age = current_time - g_last_status_push_timestamp;
-                
-                if (status_age < 1000) {
-                    // Status push is fresh (< 1 second old), camera is confirmed awake
-                    ESP_LOGI(TAG, "Camera wake confirmed (power_mode=%d, status_age=%lu ms), ready to send recording command",
-                             current_power_mode, status_age);
-                    g_wake_state = WAKE_STATE_READY;
-                } else {
-                    // Status push is stale, keep waiting
-                    ESP_LOGD(TAG, "Camera reports awake but status push is stale (%lu ms), waiting for fresh status",
-                             status_age);
-                }
-            }
-            
-            // Check for timeout (6 seconds total: 3s broadcast + 3s confirmation)
-            if (current_time - g_wake_broadcast_start_time >= 6000) {
-                ESP_LOGW(TAG, "Wake-and-record timeout (6s elapsed), camera did not respond");
-                ui_show_shutter_bottom_message("Wake Timeout", M5_COLOR_RED, 2000);
-                g_wake_state = WAKE_STATE_IDLE;
-                g_camera_states[0].pending_start_recording = false;
-            }
-            break;
-            
-        case WAKE_STATE_READY:
-            // Camera is confirmed awake, send recording command
-            if (g_camera_states[0].pending_start_recording) {
-                ESP_LOGI(TAG, "Sending start recording command after wake-up for camera 0");
-                
-                record_control_response_frame_t* response = command_logic_start_record(0);
-                if (response) {
-                    ESP_LOGI(TAG, "Recording command sent successfully after wake-up");
-                    ui_show_shutter_bottom_message("Recording Started", M5_COLOR_GREEN, 1000);
-                    free(response);
-                } else {
-                    ESP_LOGE(TAG, "Failed to send recording command after wake-up");
-                    ui_show_shutter_bottom_message("Start Failed", M5_COLOR_RED, 1500);
-                }
-                
-                // Clear pending flag and reset state
-                g_camera_states[0].pending_start_recording = false;
-                g_wake_state = WAKE_STATE_IDLE;
-                g_ui_state.display_needs_update = true;
-            } else {
-                // Shouldn't happen, but handle gracefully
-                ESP_LOGW(TAG, "Wake state READY but no pending recording, resetting to IDLE");
-                g_wake_state = WAKE_STATE_IDLE;
-            }
-            break;
-            
-        default:
-            // Invalid state, reset to IDLE
-            ESP_LOGW(TAG, "Invalid wake state %d, resetting to IDLE", g_wake_state);
-            g_wake_state = WAKE_STATE_IDLE;
-            break;
-    }
-}
-
 /* ================== Wake-Up Queue Management ================== */
 
 /**
@@ -2826,6 +2641,68 @@ void wake_queue_clear(void) {
     g_wake_queue.queue_active = false;
     g_current_wake_camera_index = -1;
     ESP_LOGI(TAG, "Wake queue cleared");
+}
+
+/**
+ * @brief Remove one slot from the wake-up queue
+ *
+ * Rebuilds the ring buffer without @p slot, keeping the order of the others.
+ * Main task only.
+ *
+ * @return true if the slot was queued and has been removed
+ */
+bool wake_queue_remove(int slot) {
+    int kept[NUM_CAMERAS];
+    int kept_count = 0;
+    bool removed = false;
+
+    for (int i = 0; i < g_wake_queue.queue_count; i++) {
+        int idx = (g_wake_queue.queue_head + i) % NUM_CAMERAS;
+        int cam = g_wake_queue.camera_indices[idx];
+        if (cam == slot) {
+            removed = true;
+        } else {
+            kept[kept_count++] = cam;
+        }
+    }
+
+    if (!removed) {
+        return false;
+    }
+
+    for (int i = 0; i < kept_count; i++) {
+        g_wake_queue.camera_indices[i] = kept[i];
+    }
+    g_wake_queue.queue_head = 0;
+    g_wake_queue.queue_tail = kept_count % NUM_CAMERAS;
+    g_wake_queue.queue_count = kept_count;
+    ESP_LOGI(TAG, "Camera %d removed from wake queue (link lost, remaining: %d)", slot, kept_count);
+    return true;
+}
+
+/**
+ * @brief Main-loop cleanup for slots that lost their link (ADR-018)
+ *
+ * Consumes the per-slot "link lost" flags set by link_evt_task. Stops a wake
+ * broadcast aimed at the dropped slot and removes it from the wake queue so
+ * "All Cameras" continues with the remaining slots. Does not touch LVGL.
+ */
+void ui_process_link_events(void) {
+    for (int slot = 0; slot < NUM_CAMERAS; slot++) {
+        if (!connect_logic_take_link_lost(slot)) {
+            continue;
+        }
+
+        if (g_current_wake_camera_index == slot) {
+            ESP_LOGW(TAG, "Camera %d lost its link during wake-up, stopping broadcast", slot);
+            ble_stop_advertising_early();
+            g_current_wake_camera_index = -1;
+            g_wake_queue_state = WAKE_QUEUE_IDLE;
+        }
+
+        wake_queue_remove(slot);
+        g_ui_state.display_needs_update = true;
+    }
 }
 
 /**

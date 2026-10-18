@@ -55,6 +55,7 @@
 #include "esp_lvgl_port.h"
 #include "../gps/gps_reader.h"
 #include "command_logic.h"
+#include "status_logic.h"
 #include "freertos/task.h"
 #include "dji_protocol_data_structures.h"
 #include "../log_config.h"
@@ -311,11 +312,11 @@ void app_main(void) {
         ui_process_pending_gpio_actions();
 
         /*
-         * WAKE-AND-RECORD PROCESSING
-         * Process wake state machine for reliable camera wake-up and recording
-         * Must be called before display update to ensure state is current
+         * LINK-LOSS CLEANUP (ADR-018)
+         * Remove slots that lost their link from the wake queue and stop a
+         * wake broadcast aimed at them. Must run before the wake queue.
          */
-        ui_process_wake_and_record();
+        ui_process_link_events();
         
         /*
          * WAKE QUEUE PROCESSING
@@ -347,11 +348,9 @@ void app_main(void) {
         if (shutter_refresh_timer >= 1000) {
             shutter_refresh_timer = 0;
             extern ui_state_t g_ui_state;
-            extern bool camera_status_initialized;
-            bool is_camera_recording(void);
-            
-            /* Refresh Main Screen when recording to update elapsed time */
-            if (camera_status_initialized && is_camera_recording()) {
+
+            /* Refresh Main Screen when any slot records to update elapsed time */
+            if (status_logic_any_slot_recording()) {
                 g_ui_state.display_needs_update = true;
             }
         }

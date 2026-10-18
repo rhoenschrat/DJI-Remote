@@ -402,8 +402,8 @@ esp_err_t command_logic_start_record_async(int camera_index) {
  * IMPORTANT: This function does NOT update internal recording state.
  * The actual recording state is determined by the camera_status field
  * in the status push messages (CmdSet=0x1D, CmdID=0x02) received from the camera.
- * Recording state should be checked via is_camera_recording() which reads
- * current_camera_status from the latest status push.
+ * Recording state should be read per slot from g_camera_states[slot].is_recording
+ * (or status_logic_any_slot_recording()), which the status push keeps current.
  * 
  * @return record_control_response_frame_t* Returns parsed response structure pointer, NULL on error
  */
@@ -502,8 +502,8 @@ esp_err_t command_logic_stop_record_async(int camera_index) {
  * IMPORTANT: This function does NOT update internal recording state.
  * The actual recording state is determined by the camera_status field
  * in the status push messages (CmdSet=0x1D, CmdID=0x02) received from the camera.
- * Recording state should be checked via is_camera_recording() which reads
- * current_camera_status from the latest status push.
+ * Recording state should be read per slot from g_camera_states[slot].is_recording
+ * (or status_logic_any_slot_recording()), which the status push keeps current.
  * 
  * @return record_control_response_frame_t* Returns parsed response structure pointer, NULL on error
  */

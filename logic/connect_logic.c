@@ -1,41 +1,40 @@
 /*
  * DJI Camera Remote Control - Connection Logic Layer
- * 
- * This file implements the complete connection management system for DJI camera
- * communication, handling both BLE and protocol-level connections.
- * 
- * Connection Flow:
- * 1. BLE Initialization: Set up ESP32 BLE stack
- * 2. Device Discovery: Scan for and connect to target camera
+ *
+ * This file implements the connection management for DJI camera communication,
+ * handling both BLE and protocol-level connections for up to three slots.
+ *
+ * Connection Flow (user-triggered, per slot):
+ * 1. BLE Initialization: Set up the BLE stack, link-event queue and task
+ * 2. Device Discovery: Scan for (or directly connect to) the target camera
  * 3. Service Discovery: Find DJI communication characteristics
- * 4. Protocol Handshake: Establish DJI protocol connection
- * 5. Maintenance: Handle disconnections and reconnection attempts
- * 
- * State Management:
- * - BLE_NOT_INIT: Initial state before BLE initialization
- * - BLE_INIT_COMPLETE: BLE ready, no connection
- * - BLE_SEARCHING: Actively scanning for cameras
- * - BLE_CONNECTED: BLE link established, protocol pending
- * - PROTOCOL_CONNECTED: Full connection, ready for commands
- * - BLE_DISCONNECTING: Graceful disconnection in progress
- * 
+ * 4. Protocol Handshake: Establish the DJI protocol connection
+ *
+ * Link-loss handling (ADR-018):
+ * - The BLE layer reports every closed link as a ble_link_event_t on the
+ *   NimBLE host task. on_link_event() only enqueues it.
+ * - link_evt_task consumes the queue and runs
+ *   connect_logic_handle_link_lost() for the affected slot only.
+ * - An unexpected drop resets just that slot to PAIRED_DISCONNECTED and asks
+ *   the main loop to clean the wake queue. There is no automatic reconnection
+ *   (ADR-001); the user reconnects with Button A "Connect".
+ * - App-initiated disconnects go through connect_logic_ble_disconnect(),
+ *   which marks the event as expected for that slot.
+ *
  * Connection Types:
  * - Pairing (verify_mode=1): Initial camera registration
- * - Reconnection (verify_mode=0): Automatic connection to known camera
+ * - Reconnection (verify_mode=0): Connection to a known camera
  * - Wake-up: BLE advertising to rouse sleeping cameras
- * 
- * Error Handling:
- * - Automatic reconnection attempts on unexpected disconnection
- * - Timeout management for all connection phases
- * - State restoration on connection failures
- * 
- * Hardware: M5Stack Basic V2.7 with ESP32 BLE capabilities
+ *
+ * Hardware: M5Stack Basic V2.7 / Waveshare ESP32-S3-LCD-1.9
  * Protocol: DJI proprietary communication protocol
  */
 
 #include <string.h>
+#include <stdatomic.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "esp_log.h"
 
 #include "ble.h"
@@ -53,11 +52,17 @@
 /* Boot scan timeout in milliseconds */
 #define BOOT_SCAN_TIMEOUT_MS 30000
 
-/* Global connection state tracking
- * Manages the current state of BLE and protocol connections
- * Used throughout the system to determine available operations
- */
-static connect_state_t connect_state = BLE_NOT_INIT;
+/* Link-event dispatch (host task -> link_evt_task).
+ * Priority 3: above main/notify (1), below LVGL port (4) and GPS (5). */
+#define LINK_EVT_QUEUE_DEPTH  8
+#define LINK_EVT_TASK_STACK   4096
+#define LINK_EVT_TASK_PRIO    3
+
+/* True once ble_init() succeeded (replaces the former global connect_state) */
+static bool s_ble_initialized = false;
+
+static QueueHandle_t s_link_evt_queue = NULL;
+static atomic_uint   s_link_evt_dropped = 0;
 
 /* Boot scan tracking structure
  * Manages the single boot scan for all paired camera slots
@@ -75,104 +80,160 @@ static bool s_boot_scan_slot_not_found[3] = {false, false, false};  // Track cam
  */
 static bool s_boot_connect_in_progress = false;
 
-/* Per-slot connection attempt tracking
- * Tracks whether an active connection attempt is in progress for each slot
+/* Per-slot connection attempt tracking.
+ * Written by the main task, read by link_evt_task and the LED timer.
  */
-static bool s_slot_is_connecting[3] = {false, false, false};
+static volatile bool s_slot_is_connecting[3] = {false, false, false};
 
-/**
- * @brief Get current connection state
- * 
- * Returns the current state of the connection system, allowing other
- * components to determine what operations are available and respond
- * appropriately to connection status changes.
- * 
- * @return connect_state_t Current connection state
+/* Per-slot link flags, read across tasks:
+ * - protocol_connected: DJI handshake completed on the current link
+ * - disconnect_expected: the next link event for this slot was caused by
+ *   connect_logic_ble_disconnect() (replaces the global BLE_DISCONNECTING)
+ * - link_lost_pending: set by link_evt_task, consumed by the main loop
+ *   (wake-queue cleanup) via connect_logic_take_link_lost()
  */
-connect_state_t connect_logic_get_state(void) {
-    return connect_state;
+static atomic_bool s_slot_protocol_connected[NUM_CAMERAS];
+static atomic_bool s_disconnect_expected[NUM_CAMERAS];
+static atomic_bool s_link_lost_pending[NUM_CAMERAS];
+
+static inline bool slot_valid(int slot) {
+    return slot >= 0 && slot < NUM_CAMERAS;
+}
+
+bool connect_logic_is_ble_initialized(void) {
+    return s_ble_initialized;
+}
+
+bool connect_logic_slot_is_protocol_connected(int slot) {
+    return slot_valid(slot) && atomic_load(&s_slot_protocol_connected[slot]);
+}
+
+bool connect_logic_take_link_lost(int slot) {
+    return slot_valid(slot) && atomic_exchange(&s_link_lost_pending[slot], false);
 }
 
 /**
- * @brief Handle camera disconnection events
- * 
- * Callback function triggered when the BLE connection to the camera is lost.
- * Implements sophisticated disconnection handling based on current state:
- * 
- * - Expected disconnections: Clean state reset
- * - Unexpected disconnections: Automatic reconnection attempt
- * - Failed reconnections: Graceful fallback to disconnected state
- * 
- * The function attempts one automatic reconnection for unexpected disconnections
- * to maintain seamless operation during temporary connection issues.
+ * @brief Reset a slot to "paired but not connected"
+ *
+ * Single source of truth used by the link-loss handler and by every
+ * connect-failure path. Last-known status values (battery, SD, camera status)
+ * are kept on purpose; the next status push refreshes them.
+ *
+ * The sleep state is NOT kept: it describes the closed link, and a stale
+ * is_sleeping would make send_command() silently block the 0x00/0x19
+ * handshake of the next connect (camera slept, then lost power). A new link
+ * starts as awake; the first status push reports the real power mode.
  */
-void receive_camera_disconnect_handler() {
-    switch (connect_state) {
-        case BLE_SEARCHING:
-            /* Already searching - no action needed */
-            break;
-        case BLE_INIT_COMPLETE:
-            ESP_LOGI(TAG, "Already in DISCONNECTED state.");
-            break;
-        case BLE_DISCONNECTING: {
-            ESP_LOGI(TAG, "Normal disconnection process.");
-            /* Expected disconnection - clean state reset */
-            connect_state = BLE_INIT_COMPLETE;
-            camera_status_initialized = false;
-            ESP_LOGI(TAG, "Current state: DISCONNECTED.");
-            break;
-        }
-        case BLE_CONNECTED:
-        case PROTOCOL_CONNECTED:
-        default: {
-            ESP_LOGW(TAG, "Unexpected disconnection from state: %d, attempting reconnection...", connect_state);
-            
-            /* Unexpected disconnection - attempt automatic reconnection */
-            bool reconnected = false;
-            ESP_LOGI(TAG, "Reconnection attempt...");
-            // Attempt reconnection for camera 0
-            if (connect_logic_ble_connect(0, SCAN_MODE_SLOT_RECONNECT) == ESP_OK) {
-                /* Wait up to 30 seconds for reconnection to complete */
-                for (int j = 0; j < 300; j++) {
-                    if (ble_is_camera_connected(0)) {  // Check camera 0 connection
-                        ESP_LOGI(TAG, "Reconnection successful");
-                        reconnected = true;
-                        return;  /* Successful reconnection - maintain current operation */
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
-            }
+void connect_logic_reset_slot_link_state(int slot) {
+    if (!slot_valid(slot)) return;
 
-            if (!reconnected) {
-                ESP_LOGE(TAG, "Reconnection failed after 1 attempts");
-                /* Reconnection failed - perform clean disconnection */
-                connect_state = BLE_INIT_COMPLETE;
-                camera_status_initialized = false;
-                ble_disconnect(0);  // Disconnect camera 0
-                ESP_LOGI(TAG, "Current state: DISCONNECTED.");
-            }
-            break;
+    camera_state_t *cam = &g_camera_states[slot];
+    cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
+    cam->is_connected = false;
+    cam->is_initialized = false;
+    cam->snapshot_pending = false;
+    cam->pending_start_recording = false;
+    cam->wake_retry_count = 0;
+    cam->camera_supports_new_status_push = false;
+    cam->mode_name[0] = '\0';
+    cam->mode_param[0] = '\0';
+    cam->last_mode_name[0] = '\0';
+    cam->last_mode_param[0] = '\0';
+    cam->power_mode = 0;
+    cam->is_sleeping = false;
+
+    s_slot_is_connecting[slot] = false;
+    atomic_store(&s_slot_protocol_connected[slot], false);
+}
+
+/**
+ * @brief Handle a closed link for one slot (runs on link_evt_task)
+ *
+ * Never reconnects, scans, waits or touches the BLE stack (ADR-001, ADR-018).
+ */
+void connect_logic_handle_link_lost(int slot, int reason, uint32_t silent_ms) {
+    if (!slot_valid(slot)) return;
+
+    atomic_store(&s_slot_protocol_connected[slot], false);
+
+    if (atomic_exchange(&s_disconnect_expected[slot], false)) {
+        ESP_LOGI(TAG, "Camera %d: expected disconnect (reason=0x%x)", slot, reason);
+        return;
+    }
+
+    if (s_slot_is_connecting[slot]) {
+        ESP_LOGI(TAG, "Camera %d: drop during connect flow (reason=0x%x), flow handles cleanup",
+                 slot, reason);
+        return;
+    }
+
+    if (!g_camera_states[slot].is_paired) {
+        return;
+    }
+
+    ESP_LOGW(TAG, "Camera %d link lost (reason=0x%x, silent=%lu ms)",
+             slot, reason, (unsigned long)silent_ms);
+
+    connect_logic_reset_slot_link_state(slot);
+    atomic_store(&s_link_lost_pending[slot], true);
+    g_ui_state.display_needs_update = true;
+}
+
+/* NimBLE host task context: enqueue only, never block (ADR-018). */
+static void on_link_event(const ble_link_event_t *evt) {
+    if (s_link_evt_queue == NULL || evt == NULL) return;
+    if (xQueueSend(s_link_evt_queue, evt, 0) != pdTRUE) {
+        /* Log only the first drop to keep the host task cheap */
+        if (atomic_fetch_add(&s_link_evt_dropped, 1) == 0) {
+            ESP_LOGW(TAG, "Link event queue full, dropping event for slot %d", evt->slot);
+        }
+    }
+}
+
+static void link_evt_task(void *arg) {
+    ble_link_event_t evt;
+    for (;;) {
+        if (xQueueReceive(s_link_evt_queue, &evt, portMAX_DELAY) == pdTRUE) {
+            connect_logic_handle_link_lost(evt.slot, evt.reason, evt.silent_ms);
         }
     }
 }
 
 /**
  * @brief Initialize BLE subsystem for camera communication
- * 
- * Performs one-time initialization of the ESP32 BLE stack and prepares
- * the system for camera connections. This must be called before any
- * connection attempts.
- * 
- * Initialization includes:
- * - ESP32 BLE controller and host setup
- * - GATT client profile registration
- * - Service and characteristic UUID configuration
- * - Connection parameter setup
- * 
+ *
+ * Creates the link-event queue and task, registers the BLE callbacks once,
+ * then initializes the BLE stack. Must be called before any connection
+ * attempts.
+ *
  * @return 0 on success, -1 on failure
  */
 int connect_logic_ble_init() {
     esp_err_t ret;
+
+    for (int i = 0; i < NUM_CAMERAS; i++) {
+        atomic_store(&s_slot_protocol_connected[i], false);
+        atomic_store(&s_disconnect_expected[i], false);
+        atomic_store(&s_link_lost_pending[i], false);
+    }
+
+    /* Dispatch infrastructure must exist before the first BLE event */
+    if (s_link_evt_queue == NULL) {
+        s_link_evt_queue = xQueueCreate(LINK_EVT_QUEUE_DEPTH, sizeof(ble_link_event_t));
+        if (s_link_evt_queue == NULL) {
+            ESP_LOGE(TAG, "Failed to create link event queue");
+            return -1;
+        }
+        if (xTaskCreate(link_evt_task, "link_evt", LINK_EVT_TASK_STACK, NULL,
+                        LINK_EVT_TASK_PRIO, NULL) != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create link event task");
+            return -1;
+        }
+    }
+
+    /* Registered once; both callbacks run on the NimBLE host task */
+    ble_set_link_event_callback(on_link_event);
+    ble_set_notify_callback(receive_camera_notify_handler);
 
     /* Initialize ESP32 BLE stack with DJI camera service configuration */
     ret = ble_init();
@@ -181,7 +242,7 @@ int connect_logic_ble_init() {
         return -1;
     }
 
-    connect_state = BLE_INIT_COMPLETE;
+    s_ble_initialized = true;
     ESP_LOGI(TAG, "BLE init successfully");
     return 0;
 }
@@ -198,23 +259,17 @@ int connect_logic_ble_init() {
  * @return int Returns 0 on success, -1 on failure
  */
 int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
-    // Mark this slot as connecting
-    if (camera_index >= 0 && camera_index < 3) {
+    // Mark this slot as connecting; a fresh flow starts with clean link flags
+    // so a stale "expected" flag can never hide a later real drop
+    if (slot_valid(camera_index)) {
         s_slot_is_connecting[camera_index] = true;
-    }
-    
-    // Don't set BLE_SEARCHING for AUTOCONNECT_BOOT mode - it's handled by boot scan logic
-    if (scan_mode != SCAN_MODE_AUTOCONNECT_BOOT) {
-        connect_state = BLE_SEARCHING;
+        atomic_store(&s_disconnect_expected[camera_index], false);
+        atomic_store(&s_slot_protocol_connected[camera_index], false);
     }
 
     esp_err_t ret;
 
-    /* 1. Set a global Notify callback for receiving remote data and protocol parsing */
-    ble_set_notify_callback(receive_camera_notify_handler);
-    ble_set_state_callback(receive_camera_disconnect_handler);
-
-    /* 2. Start scanning with specified mode */
+    /* 1. Start scanningwith specified mode */
     ESP_LOGI(TAG, "Starting BLE scan for camera %d with mode %d", camera_index, scan_mode);
     ret = ble_start_scan(scan_mode, camera_index, 30000);  // 30 second timeout
     if (ret != ESP_OK) {
@@ -222,11 +277,10 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
         if (camera_index >= 0 && camera_index < 3) {
             s_slot_is_connecting[camera_index] = false;
         }
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
 
-    /* 3. Wait up to 30 seconds to ensure BLE connection success */
+    /* 2. Wait up to 10 seconds to ensure BLE connection success */
     ESP_LOGI(TAG, "Waiting up to 10s for BLE to connect for camera %d...", camera_index);
     bool connected = false;
     for (int i = 0; i < 100; i++) { // 100 * 100ms = 10s
@@ -242,7 +296,6 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
         if (camera_index >= 0 && camera_index < 3) {
             s_slot_is_connecting[camera_index] = false;
         }
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
 
@@ -264,7 +317,6 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
         if (camera_index >= 0 && camera_index < 3) {
             s_slot_is_connecting[camera_index] = false;
         }
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
 
@@ -275,12 +327,8 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
         if (camera_index >= 0 && camera_index < 3) {
             s_slot_is_connecting[camera_index] = false;
         }
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
-
-    // Update state to BLE connected
-    connect_state = BLE_CONNECTED;
 
     // Delay RGB light display
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -306,19 +354,14 @@ int connect_logic_ble_connect_direct(int camera_index) {
     
     ESP_LOGI(TAG, "AUTOCONNECT_BOOT direct connection for slot %d (no new scan)", camera_index);
     
-    // Mark this slot as connecting
+    // Mark this slot as connecting; a fresh flow starts with clean link flags
     s_slot_is_connecting[camera_index] = true;
-    
-    // Note: We don't set connect_state to BLE_SEARCHING because we're not scanning
-    // The boot scan has already completed
+    atomic_store(&s_disconnect_expected[camera_index], false);
+    atomic_store(&s_slot_protocol_connected[camera_index], false);
 
     esp_err_t ret;
 
-    /* 1. Set global Notify callback for receiving remote data and protocol parsing */
-    ble_set_notify_callback(receive_camera_notify_handler);
-    ble_set_state_callback(receive_camera_disconnect_handler);
-
-    /* 2. Initiate direct connection (no scanning) */
+    /* 1. Initiate directconnection (no scanning) */
     ESP_LOGI(TAG, "Starting direct BLE connection for camera %d", camera_index);
     ret = ble_connect_direct(camera_index);
     if (ret != ESP_OK) {
@@ -371,33 +414,42 @@ int connect_logic_ble_connect_direct(int camera_index) {
         return -1;
     }
 
-    // Update state to BLE connected
-    connect_state = BLE_CONNECTED;
-
-    // Small delay for stability
+    // Small delayfor stability
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGI(TAG, "BLE direct connect successfully for camera %d", camera_index);
     return 0;
 }
 
 /**
- * @brief Disconnect BLE connection
- * 
- * Attempt to disconnect from BLE device.
- * 
+ * @brief Disconnect BLE connection (app-initiated)
+ *
+ * Every app-initiated disconnect must go through this function so the
+ * resulting link event is recognised as expected for this slot. The caller
+ * owns the slot state afterwards.
+ *
  * @return int Returns 0 on success, -1 on failure
  */
 int connect_logic_ble_disconnect(int camera_index) {
-    connect_state_t old_state = connect_state;
-    connect_state = BLE_DISCONNECTING;
+    if (!slot_valid(camera_index)) {
+        return -1;
+    }
 
     ESP_LOGI(TAG, "Disconnecting camera %d...", camera_index);
 
+    bool was_connected = ble_is_camera_connected(camera_index);
+    atomic_store(&s_disconnect_expected[camera_index], true);
+    atomic_store(&s_slot_protocol_connected[camera_index], false);
+
     esp_err_t ret = ble_disconnect(camera_index);
+
+    /* No link -> no event will follow; do not leave a stale flag behind */
+    if (!was_connected || ret != ESP_OK) {
+        atomic_store(&s_disconnect_expected[camera_index], false);
+    }
+
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to disconnect camera %d, BLE error: %s",
                  camera_index, esp_err_to_name(ret));
-        connect_state = old_state;
         return -1;
     }
 
@@ -554,10 +606,12 @@ wait_for_camera_command:
         // STEP4: Send connection response frame
         send_command(camera_index, 0x00, 0x19, ACK_NO_RESPONSE, &connection_response, received_seq, 5000);
 
-        // Set connection state to protocol connected
-        connect_state = PROTOCOL_CONNECTED;
-        
-        // Clear connecting flag - connection is now complete
+        // Handshake complete on this slot's link
+        if (slot_valid(camera_index)) {
+            atomic_store(&s_slot_protocol_connected[camera_index], true);
+        }
+
+        // Clear connecting flag- connection is now complete
         if (camera_index >= 0 && camera_index < 3) {
             s_slot_is_connecting[camera_index] = false;
         }
@@ -730,7 +784,7 @@ static bool connect_logic_all_slots_found(void) {
  * @brief Start single boot scan for all paired camera slots
  * 
  * Initiates a single BLE scan that searches for all paired cameras simultaneously.
- * Sets connect_state to BLE_SEARCHING during the scan so UI can show scanning_icon.
+ * The UI shows the scanning indicator via connect_logic_is_boot_scan_active().
  * 
  * @return 0 on success, -1 on failure or no paired slots
  */
@@ -738,14 +792,13 @@ int connect_logic_start_boot_scan(void) {
     // Check if any slot is paired
     if (!connect_logic_has_any_paired_slot()) {
         ESP_LOGI(TAG, "No paired slots found, skipping boot scan");
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
     
     // Reset all camera connection states to "paired but not connected" before boot scan
     // This ensures we start with a clean state and don't show stale connections
-    // Note: Sleep state (is_sleeping, power_mode) is preserved during disconnect/reconnect.
-    // The sleep state will be updated when new Camera Status Push (1D02) packets arrive.
+    // Sleep state is not touched here (nothing is known at boot yet); it is
+    // set by the first Camera Status Push (1D02) after connect.
     for (int i = 0; i < 3; i++) {
         if (g_camera_states[i].is_paired) {
             g_camera_states[i].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
@@ -766,7 +819,7 @@ int connect_logic_start_boot_scan(void) {
     for (int i = 0; i < 3; i++) {
         if (ble_is_camera_connected(i)) {
             ESP_LOGI(TAG, "Boot scan: Disconnecting stale connection for slot %d", i);
-            ble_disconnect(i);
+            connect_logic_ble_disconnect(i);
         }
     }
     
@@ -782,7 +835,6 @@ int connect_logic_start_boot_scan(void) {
     
     if (pending_count == 0) {
         ESP_LOGI(TAG, "No pending slots, skipping boot scan");
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
     
@@ -807,15 +859,11 @@ int connect_logic_start_boot_scan(void) {
     }
     ble_set_autoconnect_pending(autoconnect_pending);
     
-    // Set connect_state to BLE_SEARCHING so UI shows scanning_icon
-    connect_state = BLE_SEARCHING;
-    
-    // Start the boot scan
+// Start the boot scan
     esp_err_t ret = ble_start_scan(SCAN_MODE_AUTOCONNECT_BOOT, -1, BOOT_SCAN_TIMEOUT_MS);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start boot scan: %s", esp_err_to_name(ret));
         connect_logic_reset_boot_scan_state();
-        connect_state = BLE_INIT_COMPLETE;
         return -1;
     }
     
@@ -825,8 +873,7 @@ int connect_logic_start_boot_scan(void) {
     
     ESP_LOGI(TAG, "Boot scan started for %d paired slot(s), timeout=%d ms", 
              pending_count, BOOT_SCAN_TIMEOUT_MS);
-    ESP_LOGI(TAG, "connect_state set to BLE_SEARCHING - scanning_icon should be visible");
-    
+
     // Force UI update to show scanning indicator immediately
     g_ui_state.display_needs_update = true;
     
@@ -871,9 +918,6 @@ int connect_logic_update_boot_scan(void) {
         // Scan is complete - process results
         s_boot_scan_active = false;
         
-        // Leave BLE_SEARCHING state
-        connect_state = BLE_INIT_COMPLETE;
-        
         // Log results and mark cameras as not found
         int found_count = 0;
         int not_found_count = 0;
@@ -892,8 +936,8 @@ int connect_logic_update_boot_scan(void) {
         
         // Reset connection state for cameras that were not found
         // They should be in "paired but not connected" state
-        // Note: Sleep state (is_sleeping, power_mode) is preserved - only connection state is reset.
-        // When camera reconnects, status push will update sleep state based on actual power_mode.
+        // Only the connection state is reset here; these slots never had a
+        // link in this boot, so there is no stale sleep state to clear.
         for (int i = 0; i < 3; i++) {
             if (g_camera_states[i].is_paired && !s_boot_scan_slot_found[i]) {
                 g_camera_states[i].connection_state = CAM_STATE_PAIRED_DISCONNECTED;
@@ -982,9 +1026,6 @@ void connect_logic_stop_boot_scan_and_connect_found(void) {
     // Mark boot scan as inactive
     s_boot_scan_active = false;
     
-    // Leave BLE_SEARCHING state
-    connect_state = BLE_INIT_COMPLETE;
-    
     // Count found slots (for logging) but do NOT set connecting state
     // The connecting state will be set by ui_initiate_boot_scan_connections()
     // for each camera sequentially as it connects them
@@ -1032,8 +1073,8 @@ bool connect_logic_is_slot_found(int slot_index) {
 /**
  * @brief Check if a camera slot was not found during boot scan
  * 
- * This is used to prevent background reconnection from attempting to reconnect
- * cameras that were not available during boot scan (e.g., they were turned off).
+ * Used by the UI to show that a camera was not available during boot scan
+ * (e.g. it was turned off).
  * 
  * @param slot_index Camera slot index (0-2)
  * @return true if slot was not found during boot scan, false otherwise
@@ -1048,8 +1089,7 @@ bool connect_logic_was_slot_not_found_during_boot(int slot_index) {
 /**
  * @brief Clear the "not found during boot" flag for a camera slot
  * 
- * This should be called when a camera is manually connected (e.g., by user action)
- * so that it can be reconnected by background reconnection if it disconnects later.
+ * Called when a camera is manually connected by the user.
  * 
  * @param slot_index Camera slot index (0-2)
  */
@@ -1063,9 +1103,8 @@ void connect_logic_clear_slot_not_found_flag(int slot_index) {
 /**
  * @brief Mark a camera slot as not found during boot scan
  * 
- * This sets the "not found during boot" flag for a camera slot, which prevents
- * background reconnection from attempting to reconnect this camera automatically.
- * The camera was not available at boot time, so it's likely turned off.
+ * Sets the "not found during boot" flag for a camera slot. The camera was not
+ * available at boot time, so it's likely turned off.
  * 
  * @param slot_index Camera slot index (0-2)
  */

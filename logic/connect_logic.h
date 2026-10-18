@@ -3,16 +3,8 @@
 
 #include "ble.h"  // For scan_mode_t
 
-typedef enum {
-    BLE_NOT_INIT = -1,
-    BLE_INIT_COMPLETE = 0,
-    BLE_SEARCHING = 1,
-    BLE_CONNECTED = 2,
-    PROTOCOL_CONNECTED = 3,
-    BLE_DISCONNECTING = 4,   // Actively disconnecting state
-} connect_state_t;
-
-connect_state_t connect_logic_get_state(void);
+/* True once the BLE stack and the link-event task are initialized. */
+bool connect_logic_is_ble_initialized(void);
 
 int connect_logic_ble_init();
 
@@ -29,6 +21,12 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode);
  */
 int connect_logic_ble_connect_direct(int camera_index);
 
+/**
+ * @brief App-initiated disconnect of one slot
+ *
+ * Every app-initiated disconnect must use this function so the resulting
+ * link event is treated as expected (no link-loss reset for that slot).
+ */
 int connect_logic_ble_disconnect(int camera_index);
 
 int connect_logic_protocol_connect(int camera_index, uint32_t device_id, uint8_t mac_addr_len, const int8_t *mac_addr,
@@ -52,5 +50,35 @@ void connect_logic_mark_slot_not_found_during_boot(int slot_index);
 void connect_logic_stop_boot_scan_and_connect_found(void);
 bool connect_logic_slot_is_connecting(int slot_index);
 void connect_logic_set_slot_connecting(int slot_index, bool is_connecting);
+
+/* ---- Per-slot link state (ADR-018) ---- */
+
+/* True while the DJI handshake has completed on the slot's current link. */
+bool connect_logic_slot_is_protocol_connected(int slot);
+
+/**
+ * @brief Reset a slot to "paired but not connected"
+ *
+ * Single source of truth for link loss and every connect-failure path.
+ * Clears connection, protocol and pending-action flags of that slot only;
+ * last-known status values (battery, SD, sleep state) are kept.
+ */
+void connect_logic_reset_slot_link_state(int slot);
+
+/**
+ * @brief Handle a closed link for one slot (runs on link_evt_task)
+ *
+ * Expected disconnects and drops during a connect flow are only logged.
+ * An unexpected drop resets the slot and flags it for main-loop cleanup.
+ * Never reconnects (ADR-001).
+ */
+void connect_logic_handle_link_lost(int slot, int reason, uint32_t silent_ms);
+
+/**
+ * @brief Test-and-clear the "link lost" flag of a slot (main loop only)
+ *
+ * @return true if the slot lost its link since the last call
+ */
+bool connect_logic_take_link_lost(int slot);
 
 #endif

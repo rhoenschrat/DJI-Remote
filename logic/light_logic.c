@@ -5,7 +5,9 @@
 #include "sdkconfig.h"
 
 #include "connect_logic.h"
+#include "command_logic.h"
 #include "status_logic.h"
+#include "../main/ui.h"  // NUM_CAMERAS
 
 #define TAG "LOGIC_LIGHT"
 
@@ -55,60 +57,44 @@ uint8_t led_red = 0, led_green = 0, led_blue = 0;   // RGB values
 bool led_blinking = false;                          // Whether to blink
 bool current_led_on = false;                        // Current LED status (on or off)
 
-// Function to update LED state
+#define LED_LEVEL 13   /* 255 * 0.05 */
+
+static void set_led(uint8_t r, uint8_t g, uint8_t b, bool blink) {
+    led_red = r;
+    led_green = g;
+    led_blue = b;
+    led_blinking = blink;
+}
+
+static bool any_slot_connecting(void) {
+    for (int i = 0; i < NUM_CAMERAS; i++) {
+        if (connect_logic_slot_is_connecting(i)) return true;
+    }
+    return false;
+}
+
+static bool any_slot_connected(void) {
+    for (int i = 0; i < NUM_CAMERAS; i++) {
+        if (command_logic_slot_is_connected(i)) return true;
+    }
+    return false;
+}
+
+/* LED state computed from all slots; first match wins. Runs on the FreeRTOS
+ * timer task and only reads state. */
 static void update_led_state() {
-    connect_state_t current_connect_state = connect_logic_get_state();
-    bool current_camera_recording = is_camera_recording();
-
-    // Print current status
-    // ESP_LOGI(TAG, "Current connect state: %d, Camera recording: %d", current_connect_state, current_camera_recording);
-
-    led_blinking = false;  // LED does not blink by default
-
-    switch (current_connect_state) {
-        case BLE_NOT_INIT:
-            led_red = 13;      // 255 * 0.05
-            led_green = 0;
-            led_blue = 0;      // Red indicates Bluetooth not initialized
-            break;
-
-        case BLE_INIT_COMPLETE:
-            led_red = 13;      // 255 * 0.05
-            led_green = 13;    // 255 * 0.05
-            led_blue = 0;      // Yellow indicates Bluetooth initialization complete
-            break;
-
-        case BLE_SEARCHING:
-            led_blinking = true;
-            led_red = 0;
-            led_green = 0;
-            led_blue = 13;     // 255 * 0.05, Blue blinking indicates Bluetooth is searching
-            break;
-
-        case BLE_CONNECTED:
-            led_red = 0;
-            led_green = 0;
-            led_blue = 13;     // 255 * 0.05, Blue indicates Bluetooth is connected
-            break;
-
-        case PROTOCOL_CONNECTED:
-            if (current_camera_recording) {
-                led_blinking = true;
-                led_red = 0;
-                led_green = 13;    // 255 * 0.05
-                led_blue = 0;      // Green blinking indicates recording
-            } else {
-                led_red = 0;
-                led_green = 13;    // 255 * 0.05
-                led_blue = 0;      // Green indicates not recording
-            }
-            break;
-            
-        default:
-            led_red = 0;
-            led_green = 0;
-            led_blue = 0;  // Turn off LED
-            break;
+    if (!connect_logic_is_ble_initialized()) {
+        set_led(LED_LEVEL, 0, 0, false);                 /* red: BLE not initialized */
+    } else if (connect_logic_is_boot_scan_active()) {
+        set_led(0, 0, LED_LEVEL, true);                  /* blue blinking: boot scan */
+    } else if (any_slot_connecting()) {
+        set_led(0, 0, LED_LEVEL, false);                 /* blue: connect in progress */
+    } else if (status_logic_any_slot_recording()) {
+        set_led(0, LED_LEVEL, 0, true);                  /* green blinking: recording */
+    } else if (any_slot_connected()) {
+        set_led(0, LED_LEVEL, 0, false);                 /* green: at least one camera connected */
+    } else {
+        set_led(LED_LEVEL, LED_LEVEL, 0, false);         /* yellow: ready, nothing connected */
     }
 }
 

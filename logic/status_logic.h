@@ -3,23 +3,13 @@
 
 #include <stdint.h>
 
-// Declaration of global variables for camera status (more can be added later)
-extern uint8_t current_camera_mode;
-extern uint8_t current_camera_status;
-extern uint8_t current_video_resolution;
-extern uint8_t current_fps_idx;
-extern uint8_t current_eis_mode;
-extern uint16_t current_record_time;
-extern uint32_t current_remain_capacity;
-extern uint32_t current_remain_time;
-extern uint8_t current_camera_bat_percentage;
-extern uint8_t current_power_mode;  // Sleep mode tracking: 0=normal, 3=sleep
-extern bool camera_status_initialized;
-extern uint32_t g_last_status_push_timestamp;  // Timestamp of last camera status push (in milliseconds)
+#include <stdbool.h>
 
-bool is_camera_recording();
+/* True if any connected slot is recording. */
+bool status_logic_any_slot_recording(void);
 
-void print_camera_status();
+/* Log the current 1D02 status of one slot. */
+void print_camera_status(int slot);
 
 int subscript_camera_status(int camera_index, uint8_t push_mode, uint8_t push_freq);
 

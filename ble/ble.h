@@ -65,13 +65,27 @@ typedef struct {
 
     connection_status_t connection_status;
     handle_discovery_t handle_discovery;
+
+    /* esp_timer time (us) of the last notification; 0 = none since connect */
+    int64_t last_rx_us;
 } ble_profile_t;
 
 /* Array of BLE profiles for multi-camera support */
 extern ble_profile_t s_ble_profiles[BLE_MAX_CAMERAS];
 
 typedef void (*ble_notify_callback_t)(int camera_index, const uint8_t *data, size_t length);
-typedef void (*connect_logic_state_callback_t)(void);
+
+/* Link event: an established camera link was closed (by the peer, by
+ * supervision timeout, or by a local ble_disconnect()). */
+typedef struct {
+    int      slot;        /* 0..BLE_MAX_CAMERAS-1 */
+    int      reason;      /* NimBLE disconnect reason (BLE_HS_ERR_HCI_BASE + HCI code) */
+    uint32_t silent_ms;   /* ms since last notification; UINT32_MAX if none since connect */
+} ble_link_event_t;
+
+/* Called on the NimBLE host task. MUST NOT block, wait, poll, or call
+ * connect logic — enqueue and return. */
+typedef void (*ble_link_event_callback_t)(const ble_link_event_t *evt);
 
 esp_err_t ble_init(void);
 
@@ -90,7 +104,7 @@ esp_err_t ble_write_with_response(uint16_t conn_id, uint16_t handle, const uint8
 esp_err_t ble_register_notify(uint16_t conn_id, uint16_t char_handle);
 esp_err_t ble_unregister_notify(uint16_t conn_id, uint16_t char_handle);
 void ble_set_notify_callback(ble_notify_callback_t cb);
-void ble_set_state_callback(connect_logic_state_callback_t cb);
+void ble_set_link_event_callback(ble_link_event_callback_t cb);
 
 esp_err_t ble_start_advertising(void);
 esp_err_t ble_wake_camera(const uint8_t* camera_mac);

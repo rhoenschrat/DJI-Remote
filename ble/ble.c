@@ -11,6 +11,10 @@
  * - Notification data arrives as os_mbuf (copied to flat buffer)
  * - GATT discovery uses chained per-operation callbacks
  * - ble_gap_disc() has built-in timeout (no manual FreeRTOS timer needed)
+ *
+ * Callback rule (ADR-018): every callback into the application (notify and
+ * link events) runs on the NimBLE host task and must only copy/enqueue and
+ * return. Blocking there stalls BLE traffic for all cameras.
  */
 
 #include <string.h>
@@ -49,7 +53,7 @@ static bool s_advertising_active = false;
 static struct ble_gap_event_listener s_global_listener;
 
 static ble_notify_callback_t s_notify_cb = NULL;
-static connect_logic_state_callback_t s_state_cb = NULL;
+static ble_link_event_callback_t s_link_cb = NULL;
 
 static scan_controller_t s_scan_controller = {
     .mode = SCAN_MODE_IDLE,
@@ -108,6 +112,7 @@ static void init_ble_profiles(void) {
         s_ble_profiles[i].connection_status.is_connected = false;
         s_ble_profiles[i].handle_discovery.notify_char_handle_found = false;
         s_ble_profiles[i].handle_discovery.write_char_handle_found = false;
+        s_ble_profiles[i].last_rx_us = 0;
     }
     ESP_LOGI(TAG, "Initialized %d BLE profiles for multi-camera support", BLE_MAX_CAMERAS);
 }
@@ -408,18 +413,30 @@ static int on_write_complete(uint16_t conn_handle,
                              const struct ble_gatt_error *error,
                              struct ble_gatt_attr *attr, void *arg)
 {
-    if (error->status != 0) {
-        ESP_LOGE(TAG, "Write failed, conn_handle=%d attr_handle=0x%x status=%d",
+    if (error->status == 0) {
+        ESP_LOGD(TAG, "Write complete, conn_handle=%d attr_handle=0x%x",
+                 conn_handle, attr ? attr->handle : 0);
+        return 0;
+    }
+
+    /* Only errors that mean the link itself is gone mark the slot
+     * disconnected. ATT errors (e.g. a rejected write) leave the link up;
+     * a real link loss is reported by BLE_GAP_EVENT_DISCONNECT. */
+    bool link_error = (error->status == BLE_HS_ENOTCONN ||
+                       error->status == BLE_HS_EDISABLED ||
+                       error->status == BLE_HS_ETIMEOUT);
+    ble_profile_t *profile = get_profile_by_conn_id(conn_handle);
+    if (link_error) {
+        ESP_LOGE(TAG, "Write failed (link error), conn_handle=%d attr_handle=0x%x status=%d",
                  conn_handle, attr ? attr->handle : 0, error->status);
-        ble_profile_t *profile = get_profile_by_conn_id(conn_handle);
         if (profile) {
             profile->connection_status.is_connected = false;
-            ESP_LOGW(TAG, "Camera %d: Marking as disconnected due to write failure",
+            ESP_LOGW(TAG, "Camera %d: Marking as disconnected due to link error",
                      profile->camera_index);
         }
     } else {
-        ESP_LOGI(TAG, "Write complete, conn_handle=%d attr_handle=0x%x",
-                 conn_handle, attr ? attr->handle : 0);
+        ESP_LOGW(TAG, "Write failed (ATT error 0x%x), conn_handle=%d attr_handle=0x%x, link kept",
+                 error->status, conn_handle, attr ? attr->handle : 0);
     }
     return 0;
 }
@@ -620,6 +637,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 
         profile->conn_id = event->connect.conn_handle;
         profile->connection_status.is_connected = true;
+        profile->last_rx_us = 0;
         memcpy(profile->remote_bda, peer_bda_be, 6);
 
         int slot = profile->camera_index;
@@ -651,6 +669,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
 
         if (profile) {
             int camera_idx = profile->camera_index;
+
+            /* Silence time must be read before the profile is cleared */
+            uint32_t silent_ms = UINT32_MAX;
+            if (profile->last_rx_us > 0) {
+                silent_ms = (uint32_t)((esp_timer_get_time() - profile->last_rx_us) / 1000);
+            }
+
             profile->connection_status.is_connected = false;
             profile->conn_id = UINT16_MAX;
             profile->handle_discovery.write_char_handle_found = false;
@@ -658,20 +683,29 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             profile->notify_char_handle = 0;
             profile->write_char_handle = 0;
             profile->cccd_handle = 0;
-            ESP_LOGI(TAG, "Camera %d disconnected, reason=0x%x",
-                     camera_idx, event->disconnect.reason);
+            profile->last_rx_us = 0;
+            ESP_LOGI(TAG, "Camera %d disconnected, reason=0x%x, silent_ms=%lu",
+                     camera_idx, event->disconnect.reason, (unsigned long)silent_ms);
 
             if (s_active_scan_camera_index == camera_idx) {
                 s_active_scan_camera_index = -1;
             }
+
+            s_connecting = false;
+
+            /* Hand the event to the application; the callback only enqueues */
+            if (s_link_cb && camera_idx >= 0 && camera_idx < BLE_MAX_CAMERAS) {
+                ble_link_event_t evt = {
+                    .slot = camera_idx,
+                    .reason = event->disconnect.reason,
+                    .silent_ms = silent_ms,
+                };
+                s_link_cb(&evt);
+            }
         } else {
             ESP_LOGW(TAG, "Disconnect for unknown conn_handle=%d, reason=0x%x",
                      conn_handle, event->disconnect.reason);
-        }
-
-        s_connecting = false;
-        if (s_state_cb) {
-            s_state_cb();
+            s_connecting = false;
         }
         break;
     }
@@ -685,6 +719,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
                  conn_handle, attr_handle, data_len, event->notify_rx.indication);
 
         profile = get_profile_by_conn_id(conn_handle);
+        if (profile) {
+            profile->last_rx_us = esp_timer_get_time();
+        }
 
         if (s_notify_cb && profile) {
             uint8_t buf[512];
@@ -1231,8 +1268,8 @@ void ble_set_notify_callback(ble_notify_callback_t cb) {
     s_notify_cb = cb;
 }
 
-void ble_set_state_callback(connect_logic_state_callback_t cb) {
-    s_state_cb = cb;
+void ble_set_link_event_callback(ble_link_event_callback_t cb) {
+    s_link_cb = cb;
 }
 
 /* ----------------------------------------------------------------
