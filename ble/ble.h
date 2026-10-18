@@ -118,6 +118,10 @@ uint16_t ble_get_write_handle(int camera_index);
 uint16_t ble_get_notify_handle(int camera_index);
 uint16_t ble_get_cccd_handle(int camera_index);
 bool ble_is_camera_connected(int camera_index);
+/* True once the slot has no connection handle any more, i.e. the
+ * BLE_GAP_EVENT_DISCONNECT of the last link was processed. ble_disconnect()
+ * clears is_connected immediately; the handle is only released by the event. */
+bool ble_is_link_released(int camera_index);
 
 void ble_set_target_device(int camera_index, const char* name, const uint8_t* mac);
 

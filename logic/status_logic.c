@@ -30,6 +30,52 @@
 
 static const char *TAG = "LOGIC_STATUS";
 
+/* Debug-only hang simulation for the liveness watchdog (ADR-019).
+ * Set LIVENESS_DEBUG_MUTE_SLOT to 0..2 to drop that slot's 1D02 pushes once
+ * per boot, starting after LIVENESS_DEBUG_MUTE_AFTER pushes (~20 s at 2 Hz):
+ * - LIVENESS_DEBUG_MUTE_MS > 0: resume after that many ms (recovery test)
+ * - LIVENESS_DEBUG_MUTE_MS = 0: stay muted until the link is gone; the first
+ *   push more than 20 s after muting began (a new link) ends the simulation
+ * Must stay -1 in committed code. */
+#define LIVENESS_DEBUG_MUTE_SLOT   (-1)
+#define LIVENESS_DEBUG_MUTE_MS     0
+#define LIVENESS_DEBUG_MUTE_AFTER  40
+
+#if LIVENESS_DEBUG_MUTE_SLOT >= 0
+static bool liveness_debug_drop_push(int camera_index) {
+    static int s_count = 0;
+    static bool s_muting = false;
+    static bool s_done = false;
+    static uint32_t s_start_ms = 0;
+
+    if (camera_index != LIVENESS_DEBUG_MUTE_SLOT || s_done) return false;
+
+    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (!s_muting) {
+        if (++s_count < LIVENESS_DEBUG_MUTE_AFTER) return false;
+        s_muting = true;
+        s_start_ms = now;
+        ESP_LOGW(TAG, "DEBUG: muting 1D02 pushes of camera %d", camera_index);
+        return true;
+    }
+
+    uint32_t muted_ms = now - s_start_ms;
+#if LIVENESS_DEBUG_MUTE_MS > 0
+    bool resume = (muted_ms >= LIVENESS_DEBUG_MUTE_MS);
+#else
+    bool resume = (muted_ms > 20000);
+#endif
+    if (resume) {
+        s_muting = false;
+        s_done = true;
+        ESP_LOGW(TAG, "DEBUG: camera %d pushes resumed after %lu ms",
+                 camera_index, (unsigned long)muted_ms);
+        return false;
+    }
+    return true;
+}
+#endif
+
 /**
  * @brief Check whether any connected slot is recording
  *
@@ -126,6 +172,10 @@ void update_camera_state_handler(int camera_index, void *data) {
         ESP_LOGE(TAG, "Invalid camera_index %d in status update", camera_index);
         return;
     }
+
+#if LIVENESS_DEBUG_MUTE_SLOT >= 0
+    if (liveness_debug_drop_push(camera_index)) return;
+#endif
 
     const camera_status_push_command_frame *parsed_data = (const camera_status_push_command_frame *)data;
 

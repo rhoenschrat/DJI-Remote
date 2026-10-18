@@ -66,7 +66,8 @@ typedef enum {
     CAM_STATE_UNPAIRED = 0,           /* No camera paired in this slot */
     CAM_STATE_PAIRED_DISCONNECTED,    /* Camera paired but not currently connected */
     CAM_STATE_CONNECTING,             /* Currently attempting to connect */
-    CAM_STATE_CONNECTED               /* Camera connected and ready */
+    CAM_STATE_CONNECTED,              /* Camera connected and ready */
+    CAM_STATE_UNRESPONSIVE            /* Link up, handshake done, but no 1D02 push for >= 6 s (ADR-019) */
 } camera_connection_state_t;
 
 typedef struct camera_state_s {

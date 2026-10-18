@@ -21,6 +21,16 @@
  * - App-initiated disconnects go through connect_logic_ble_disconnect(),
  *   which marks the event as expected for that slot.
  *
+ * Liveness watchdog (ADR-019):
+ * - link_evt_task also wakes every LINK_EVT_POLL_MS and checks every
+ *   connected, awake slot for the 2 Hz 1D02 status push.
+ * - No push for LIVENESS_UNRESPONSIVE_MS -> CAM_STATE_UNRESPONSIVE (no
+ *   commands, no GPS); a fresh push returns the slot to CAM_STATE_CONNECTED.
+ * - LIVENESS_TEARDOWN_MS of total silence -> the link is terminated without
+ *   the expected flag, so the normal link-loss path above takes over.
+ * - The watchdog is the only writer of CONNECTED <-> UNRESPONSIVE. It never
+ *   reconnects, scans or waits.
+ *
  * Connection Types:
  * - Pairing (verify_mode=1): Initial camera registration
  * - Reconnection (verify_mode=0): Connection to a known camera
@@ -35,6 +45,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/portmacro.h"
+#include <sys/param.h>  // MIN
 #include "esp_log.h"
 
 #include "ble.h"
@@ -57,6 +69,14 @@
 #define LINK_EVT_QUEUE_DEPTH  8
 #define LINK_EVT_TASK_STACK   4096
 #define LINK_EVT_TASK_PRIO    3
+
+/* Liveness watchdog (ADR-019). The camera pushes 1D02 at 2 Hz; 6 s = 12
+ * missed pushes. Teardown is counted from the last push and stays well
+ * below NimBLE's 30 s GATT procedure timeout. */
+#define LIVENESS_UNRESPONSIVE_MS  6000
+#define LIVENESS_TEARDOWN_MS      15000
+#define LINK_EVT_POLL_MS          500
+#define TEARDOWN_POLL_MS          100
 
 /* True once ble_init() succeeded (replaces the former global connect_state) */
 static bool s_ble_initialized = false;
@@ -96,6 +116,26 @@ static atomic_bool s_slot_protocol_connected[NUM_CAMERAS];
 static atomic_bool s_disconnect_expected[NUM_CAMERAS];
 static atomic_bool s_link_lost_pending[NUM_CAMERAS];
 
+/* Liveness watchdog state (ADR-019):
+ * - liveness_armed_ms: baseline set at handshake completion and on wake-up;
+ *   last_status_timestamp survives across links, so silence is measured from
+ *   whichever is newer
+ * - teardown_requested: the watchdog terminated the current link (once)
+ * - last_seen_sleeping: watchdog-private, detects sleeping -> awake
+ * - s_slot_state_mux: serialises the watchdog's CONNECTED <-> UNRESPONSIVE
+ *   check-and-set with connect_logic_reset_slot_link_state(), so a reset can
+ *   never be overwritten by a late UNRESPONSIVE. No logging inside.
+ */
+static volatile uint32_t s_liveness_armed_ms[NUM_CAMERAS];
+static atomic_bool s_teardown_requested[NUM_CAMERAS];
+static bool s_last_seen_sleeping[NUM_CAMERAS];
+static portMUX_TYPE s_slot_state_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Same time base as status_logic's last_status_timestamp */
+static inline uint32_t liveness_now_ms(void) {
+    return xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
 static inline bool slot_valid(int slot) {
     return slot >= 0 && slot < NUM_CAMERAS;
 }
@@ -110,6 +150,11 @@ bool connect_logic_slot_is_protocol_connected(int slot) {
 
 bool connect_logic_take_link_lost(int slot) {
     return slot_valid(slot) && atomic_exchange(&s_link_lost_pending[slot], false);
+}
+
+bool connect_logic_slot_is_unresponsive(int slot) {
+    return slot_valid(slot) &&
+           g_camera_states[slot].connection_state == CAM_STATE_UNRESPONSIVE;
 }
 
 /**
@@ -128,6 +173,8 @@ void connect_logic_reset_slot_link_state(int slot) {
     if (!slot_valid(slot)) return;
 
     camera_state_t *cam = &g_camera_states[slot];
+
+    taskENTER_CRITICAL(&s_slot_state_mux);
     cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
     cam->is_connected = false;
     cam->is_initialized = false;
@@ -144,6 +191,8 @@ void connect_logic_reset_slot_link_state(int slot) {
 
     s_slot_is_connecting[slot] = false;
     atomic_store(&s_slot_protocol_connected[slot], false);
+    atomic_store(&s_teardown_requested[slot], false);
+    taskEXIT_CRITICAL(&s_slot_state_mux);
 }
 
 /**
@@ -190,11 +239,107 @@ static void on_link_event(const ble_link_event_t *evt) {
     }
 }
 
+/**
+ * @brief Terminate the link of an unresponsive slot (link_evt_task)
+ *
+ * The only documented exception to "app-initiated disconnects go through
+ * connect_logic_ble_disconnect()": the expected flag is deliberately NOT set,
+ * so the resulting link event takes the normal link-lost path (slot reset,
+ * wake-queue cleanup, UI update). Fires once per link. ble_gap_terminate()
+ * is asynchronous, so this never blocks (ADR-019).
+ */
+static void connect_logic_terminate_unresponsive(int slot, uint32_t silence_ms) {
+    atomic_store(&s_teardown_requested[slot], true);
+    ESP_LOGW(TAG, "Camera %d: no status push for %lu ms, terminating link",
+             slot, (unsigned long)silence_ms);
+    ble_disconnect(slot);
+}
+
+/* Try to switch a slot from @p from to @p to; re-checks under the lock so a
+ * concurrent reset or connect flow wins. */
+static bool liveness_try_transition(int slot, camera_connection_state_t from,
+                                    camera_connection_state_t to) {
+    bool changed = false;
+    taskENTER_CRITICAL(&s_slot_state_mux);
+    if (g_camera_states[slot].connection_state == from && !s_slot_is_connecting[slot]) {
+        g_camera_states[slot].connection_state = to;
+        changed = true;
+    }
+    taskEXIT_CRITICAL(&s_slot_state_mux);
+    return changed;
+}
+
+/**
+ * @brief Liveness check for one slot (link_evt_task, every LINK_EVT_POLL_MS)
+ *
+ * Only the 1D02 push (last_status_timestamp) counts as a sign of life.
+ * Sleeping cameras are not watched.
+ */
+static void liveness_check_slot(int slot, uint32_t now_ms) {
+    camera_state_t *cam = &g_camera_states[slot];
+    camera_connection_state_t state = cam->connection_state;
+
+    if ((state != CAM_STATE_CONNECTED && state != CAM_STATE_UNRESPONSIVE) ||
+        !atomic_load(&s_slot_protocol_connected[slot]) ||
+        !ble_is_camera_connected(slot) ||
+        s_slot_is_connecting[slot]) {
+        return;
+    }
+
+    if (cam->is_sleeping) {
+        s_last_seen_sleeping[slot] = true;
+        return;
+    }
+    if (s_last_seen_sleeping[slot]) {
+        /* Woke up: give the camera a fresh window */
+        s_last_seen_sleeping[slot] = false;
+        s_liveness_armed_ms[slot] = now_ms;
+    }
+
+    uint32_t since_push = now_ms - cam->last_status_timestamp;
+    uint32_t since_armed = now_ms - s_liveness_armed_ms[slot];
+    uint32_t silence = MIN(since_push, since_armed);
+
+    if (state == CAM_STATE_CONNECTED) {
+        if (silence >= LIVENESS_UNRESPONSIVE_MS &&
+            liveness_try_transition(slot, CAM_STATE_CONNECTED, CAM_STATE_UNRESPONSIVE)) {
+            ESP_LOGW(TAG, "Camera %d: unresponsive (no status push for %lu ms)",
+                     slot, (unsigned long)silence);
+            g_ui_state.display_needs_update = true;
+        }
+        return;
+    }
+
+    /* CAM_STATE_UNRESPONSIVE */
+    if (silence < LIVENESS_UNRESPONSIVE_MS) {
+        if (liveness_try_transition(slot, CAM_STATE_UNRESPONSIVE, CAM_STATE_CONNECTED)) {
+            ESP_LOGI(TAG, "Camera %d: responsive again", slot);
+            g_ui_state.display_needs_update = true;
+        }
+        return;
+    }
+
+    if (silence >= LIVENESS_TEARDOWN_MS && !atomic_load(&s_teardown_requested[slot])) {
+        connect_logic_terminate_unresponsive(slot, silence);
+    }
+}
+
 static void link_evt_task(void *arg) {
     ble_link_event_t evt;
+    TickType_t last_check = xTaskGetTickCount();
     for (;;) {
-        if (xQueueReceive(s_link_evt_queue, &evt, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_link_evt_queue, &evt, pdMS_TO_TICKS(LINK_EVT_POLL_MS)) == pdTRUE) {
             connect_logic_handle_link_lost(evt.slot, evt.reason, evt.silent_ms);
+        }
+
+        /* Rate-limited so a burst of link events does not re-run the checks */
+        TickType_t now = xTaskGetTickCount();
+        if ((TickType_t)(now - last_check) >= pdMS_TO_TICKS(LINK_EVT_POLL_MS)) {
+            last_check = now;
+            uint32_t now_ms = liveness_now_ms();
+            for (int slot = 0; slot < NUM_CAMERAS; slot++) {
+                liveness_check_slot(slot, now_ms);
+            }
         }
     }
 }
@@ -215,6 +360,9 @@ int connect_logic_ble_init() {
         atomic_store(&s_slot_protocol_connected[i], false);
         atomic_store(&s_disconnect_expected[i], false);
         atomic_store(&s_link_lost_pending[i], false);
+        atomic_store(&s_teardown_requested[i], false);
+        s_liveness_armed_ms[i] = 0;
+        s_last_seen_sleeping[i] = false;
     }
 
     /* Dispatch infrastructure must exist before the first BLE event */
@@ -265,6 +413,7 @@ int connect_logic_ble_connect(int camera_index, scan_mode_t scan_mode) {
         s_slot_is_connecting[camera_index] = true;
         atomic_store(&s_disconnect_expected[camera_index], false);
         atomic_store(&s_slot_protocol_connected[camera_index], false);
+        atomic_store(&s_teardown_requested[camera_index], false);
     }
 
     esp_err_t ret;
@@ -358,6 +507,7 @@ int connect_logic_ble_connect_direct(int camera_index) {
     s_slot_is_connecting[camera_index] = true;
     atomic_store(&s_disconnect_expected[camera_index], false);
     atomic_store(&s_slot_protocol_connected[camera_index], false);
+    atomic_store(&s_teardown_requested[camera_index], false);
 
     esp_err_t ret;
 
@@ -454,6 +604,37 @@ int connect_logic_ble_disconnect(int camera_index) {
     }
 
     ESP_LOGI(TAG, "Camera %d disconnected successfully", camera_index);
+    return 0;
+}
+
+/* See connect_logic.h: why the UI must wait for the link to be released */
+int connect_logic_teardown_and_wait(int slot, uint32_t timeout_ms) {
+    if (!slot_valid(slot)) {
+        return -1;
+    }
+
+    /* Keeps the watchdog off the slot and turns a late link event of an
+     * already terminated link into "drop during connect flow" */
+    s_slot_is_connecting[slot] = true;
+
+    connect_logic_ble_disconnect(slot);
+
+    uint32_t waited_ms = 0;
+    bool released = ble_is_link_released(slot);
+    while (!released && waited_ms < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(TEARDOWN_POLL_MS));
+        waited_ms += TEARDOWN_POLL_MS;
+        released = ble_is_link_released(slot);
+    }
+
+    connect_logic_reset_slot_link_state(slot);
+
+    if (!released) {
+        ESP_LOGW(TAG, "Camera %d: link not released after %lu ms",
+                 slot, (unsigned long)timeout_ms);
+        return -1;
+    }
+    ESP_LOGI(TAG, "Camera %d: link released after %lu ms", slot, (unsigned long)waited_ms);
     return 0;
 }
 
@@ -606,8 +787,9 @@ wait_for_camera_command:
         // STEP4: Send connection response frame
         send_command(camera_index, 0x00, 0x19, ACK_NO_RESPONSE, &connection_response, received_seq, 5000);
 
-        // Handshake complete on this slot's link
+        // Handshake complete on this slot's link; arm the liveness baseline
         if (slot_valid(camera_index)) {
+            s_liveness_armed_ms[camera_index] = liveness_now_ms();
             atomic_store(&s_slot_protocol_connected[camera_index], true);
         }
 

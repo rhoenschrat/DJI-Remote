@@ -1465,6 +1465,12 @@ bool ble_is_camera_connected(int camera_index) {
     return p ? p->connection_status.is_connected : false;
 }
 
+bool ble_is_link_released(int camera_index) {
+    if (camera_index < 0 || camera_index >= BLE_MAX_CAMERAS) return true;
+    ble_profile_t* p = get_profile_by_camera_index(camera_index);
+    return p ? (p->conn_id == UINT16_MAX) : true;
+}
+
 /* ----------------------------------------------------------------
  *  Target device configuration
  * ---------------------------------------------------------------- */

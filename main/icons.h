@@ -39,6 +39,7 @@ extern const uint8_t select_icon[72];
 extern const uint8_t next_icon[72];
 extern const uint8_t options_icon[72];
 extern const uint8_t switch_icon[72];
+extern const uint8_t alert_icon[72];
 
 // Icon color definitions (RBG565 - swapped green/blue for this display)
 #define ICON_BLUE    0x07E0   // Blue for Connect (was green in RGB)

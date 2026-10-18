@@ -22,7 +22,7 @@
 #define ICON_H         24
 #define ICON_STRIDE    3                        /* 24 / 8 */
 #define ICON_DATA_SIZE (ICON_STRIDE * ICON_H)   /* 72     */
-#define ICON_COUNT     30
+#define ICON_COUNT     31
 
 /* ----- A1 pixel buffers (inverted copies, filled by lvgl_icons_init) --- */
 
@@ -60,6 +60,7 @@ lv_image_dsc_t lvgl_select_icon;
 lv_image_dsc_t lvgl_next_icon;
 lv_image_dsc_t lvgl_options_icon;
 lv_image_dsc_t lvgl_switch_icon;
+lv_image_dsc_t lvgl_alert_icon;
 
 /* ----- Helpers --------------------------------------------------------- */
 
@@ -120,6 +121,7 @@ void lvgl_icons_init(void)
         { &lvgl_next_icon,        next_icon        },
         { &lvgl_options_icon,     options_icon     },
         { &lvgl_switch_icon,      switch_icon      },
+        { &lvgl_alert_icon,       alert_icon       },
     };
 
     for (int i = 0; i < ICON_COUNT; i++) {

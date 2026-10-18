@@ -139,6 +139,14 @@ CommandResult send_command(int camera_index, uint8_t cmd_set, uint8_t cmd_id, ui
         return result;
     }
 
+    // Unresponsive slots (link up, no status push) receive nothing, GPS
+    // included; the liveness watchdog owns them until recovery or teardown
+    // (ADR-019)
+    if (g_camera_states[camera_index].connection_state == CAM_STATE_UNRESPONSIVE) {
+        ESP_LOGD(TAG, "Camera %d: Command blocked - slot unresponsive", camera_index);
+        return result;
+    }
+
     // Check if camera can accept commands (sleep mode blocking)
     // All commands to sleeping cameras are blocked except wake commands (0x00/0x1A with power_mode=0x00)
     if (!camera_can_accept_commands(camera_index, cmd_set, cmd_id, input_raw_data)) {

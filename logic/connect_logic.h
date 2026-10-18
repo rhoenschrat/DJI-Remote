@@ -60,8 +60,8 @@ bool connect_logic_slot_is_protocol_connected(int slot);
  * @brief Reset a slot to "paired but not connected"
  *
  * Single source of truth for link loss and every connect-failure path.
- * Clears connection, protocol and pending-action flags of that slot only;
- * last-known status values (battery, SD, sleep state) are kept.
+ * Clears connection, protocol and pending-action flags and the sleep state
+ * of that slot only; last-known battery and SD values are kept.
  */
 void connect_logic_reset_slot_link_state(int slot);
 
@@ -80,5 +80,31 @@ void connect_logic_handle_link_lost(int slot, int reason, uint32_t silent_ms);
  * @return true if the slot lost its link since the last call
  */
 bool connect_logic_take_link_lost(int slot);
+
+/* Max. time the UI waits for an unresponsive link to be released before it
+ * reconnects (ADR-019) */
+#define UNRESPONSIVE_RELEASE_WAIT_MS 3000
+
+/**
+ * @brief True if the liveness watchdog marked the slot unresponsive (ADR-019)
+ */
+bool connect_logic_slot_is_unresponsive(int slot);
+
+/**
+ * @brief Close a slot's link and wait until it is released (main task only)
+ *
+ * Expected disconnect via connect_logic_ble_disconnect(), then polls
+ * ble_is_link_released() every 100 ms up to @p timeout_ms and finally resets
+ * the slot to paired-disconnected.
+ *
+ * Waiting matters: if a new connection starts before the old link's
+ * BLE_GAP_EVENT_DISCONNECT was processed, that late event can hit the profile
+ * of the new link when NimBLE reuses the connection handle.
+ *
+ * Blocks; never call with the LVGL lock held.
+ *
+ * @return 0 if the link was released, -1 on timeout (slot is reset either way)
+ */
+int connect_logic_teardown_and_wait(int slot, uint32_t timeout_ms);
 
 #endif

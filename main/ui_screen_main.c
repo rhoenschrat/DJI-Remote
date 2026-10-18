@@ -90,6 +90,13 @@ static void get_status_icon_and_color(int idx, const camera_state_t *st,
                      || connect_logic_is_boot_connect_in_progress();
     bool found = connect_logic_is_slot_found(idx) && boot_active;
 
+    /* Checked first: link up but no status push (ADR-019) */
+    if (st->connection_state == CAM_STATE_UNRESPONSIVE) {
+        *icon_out  = &lvgl_alert_icon;
+        *color_out = ui_clr_yellow();
+        return;
+    }
+
     if (st->connection_state == CAM_STATE_CONNECTED) {
         if (st->is_sleeping) {
             *icon_out  = &lvgl_sleep_icon;

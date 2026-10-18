@@ -192,6 +192,10 @@ static int g_settings_active_camera_index = 0;
 /* Mode Switch Screen state (slot index used by ui_switch_screen) */
 static int g_mode_switch_camera_index = 0;
 
+/* Slot whose Button A "Connect" hit an unresponsive link (ADR-019); handled
+ * after the LVGL lock is released: teardown, wait for release, reconnect */
+static int s_pending_unresponsive_reconnect = -1;
+
 /* Wake-up queue for serialized wake broadcasts in "All Cameras" mode */
 wake_queue_t g_wake_queue = {0};
 wake_queue_state_t g_wake_queue_state = WAKE_QUEUE_IDLE;
@@ -1732,6 +1736,19 @@ static void ui_handle_settings_screen_button_a(void) {
     int active_slot = ui_screen_settings_get_camera_index();
     camera_state_t *cam = &g_camera_states[active_slot];
 
+    // Unresponsive slot (ADR-019): nothing may be sent, so Mode Switch and
+    // Sleep/Wakeup are refused. Connect and Unpair stay available.
+    if (cam->connection_state == CAM_STATE_UNRESPONSIVE &&
+        (sel == SETTINGS_ITEM_MODE_SWITCH || sel == SETTINGS_ITEM_SLEEP_WAKEUP)) {
+        ESP_LOGW(TAG, "Settings: camera %d not responding, action refused", active_slot);
+        ui_screen_settings_set_notification("Not responding", lv_color_make(255, 0, 0));
+        lvgl_port_unlock();
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        lvgl_port_lock(0);
+        ui_return_to_main_screen();
+        return;
+    }
+
     switch (sel) {
         case SETTINGS_ITEM_MODE_SWITCH:
             ESP_LOGI(TAG, "Settings: Mode Switch selected for camera %d", active_slot + 1);
@@ -1792,6 +1809,30 @@ static void ui_handle_settings_screen_button_a(void) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 lvgl_port_lock(0);
                 ui_return_to_main_screen();
+            } else if (cam->connection_state == CAM_STATE_UNRESPONSIVE) {
+                ESP_LOGI(TAG, "Settings: Reconnecting unresponsive camera %d", active_slot);
+                ui_screen_settings_set_notification("Reconnecting...", lv_color_make(0, 0, 255));
+                connect_logic_set_slot_connecting(active_slot, true);
+                cam->connection_state = CAM_STATE_CONNECTING;
+                lvgl_port_unlock();
+
+                int result = -1;
+                if (connect_logic_teardown_and_wait(active_slot, UNRESPONSIVE_RELEASE_WAIT_MS) == 0) {
+                    result = ui_perform_complete_reconnection(active_slot, true);
+                }
+
+                lvgl_port_lock(0);
+                if (result == 0) {
+                    ESP_LOGI(TAG, "Reconnection successful");
+                    ui_screen_settings_set_notification("Connected!", lv_color_make(0, 255, 0));
+                } else {
+                    ESP_LOGW(TAG, "Reconnection failed");
+                    ui_screen_settings_set_notification("Connection failed", lv_color_make(255, 0, 0));
+                }
+                lvgl_port_unlock();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                lvgl_port_lock(0);
+                ui_return_to_main_screen();
             } else {
                 ESP_LOGI(TAG, "Settings: Connecting camera %d", active_slot);
                 ui_screen_settings_set_notification("Connecting...", lv_color_make(0, 0, 255));
@@ -1819,10 +1860,14 @@ static void ui_handle_settings_screen_button_a(void) {
             if (cam->is_paired) {
                 ESP_LOGI(TAG, "Settings: Unpairing camera %d", active_slot);
 
-                if (cam->connection_state == CAM_STATE_CONNECTED) {
+                // Any open link (also an unresponsive one) is closed first
+                if (ble_is_camera_connected(active_slot)) {
                     ESP_LOGI(TAG, "Camera %d connected, disconnecting before unpairing", active_slot);
                     ui_screen_settings_set_notification("Disconnecting...", lv_color_make(255, 255, 0));
                     connect_logic_ble_disconnect(active_slot);
+                    // Leaves CONNECTED/UNRESPONSIVE under the watchdog lock
+                    // before the slot is wiped below
+                    connect_logic_reset_slot_link_state(active_slot);
                     lvgl_port_unlock();
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     lvgl_port_lock(0);
@@ -1957,6 +2002,28 @@ void ui_handle_button_a(void) {
             break;
     }
     lvgl_port_unlock();
+
+    // Deferred unresponsive reconnect (ADR-019). Checked before the regular
+    // deferred reconnect: the teardown resets is_connected, which would
+    // otherwise trigger that path too.
+    if (s_pending_unresponsive_reconnect >= 0) {
+        int cam_idx = s_pending_unresponsive_reconnect;
+        s_pending_unresponsive_reconnect = -1;
+        if (connect_logic_teardown_and_wait(cam_idx, UNRESPONSIVE_RELEASE_WAIT_MS) == 0) {
+            int result = ui_perform_complete_reconnection(cam_idx, true);
+            ESP_LOGI(TAG, "Unresponsive reconnect for camera %d: %s",
+                     cam_idx, result == 0 ? "successful" : "failed");
+        } else {
+            ESP_LOGW(TAG, "Camera %d: link not released, reconnect aborted", cam_idx);
+            lvgl_port_lock(0);
+            ui_show_shutter_bottom_message("Reconnect failed", M5_COLOR_RED, 1500);
+            lvgl_port_unlock();
+        }
+        lvgl_port_lock(0);
+        g_ui_state.display_needs_update = true;
+        lvgl_port_unlock();
+        return;
+    }
 
     // Deferred reconnection: runs outside the LVGL lock so the display
     // can refresh to show "connecting" state during the blocking BLE call.
@@ -2325,6 +2392,8 @@ void ui_screen_main(void) {
         // "All cameras" mode - control all connected cameras
         ESP_LOGI(TAG, "All cameras mode - controlling all connected cameras");
         
+        // Only CAM_STATE_CONNECTED slots take part; unresponsive slots are
+        // skipped by these checks (ADR-019)
         // Determine if any connected camera is recording
         bool any_recording = false;
         for (int i = 0; i < NUM_CAMERAS; i++) {
@@ -2447,6 +2516,16 @@ void ui_screen_main(void) {
     
     // Check if this camera is connected
     if (g_camera_states[cam_idx].connection_state != CAM_STATE_CONNECTED) {
+        // Unresponsive link (ADR-019): tear down and reconnect after lock release.
+        // The connecting flag goes first so the watchdog leaves the slot alone.
+        if (g_camera_states[cam_idx].connection_state == CAM_STATE_UNRESPONSIVE) {
+            ESP_LOGI(TAG, "Camera %d is unresponsive - scheduling teardown and reconnect", cam_idx);
+            connect_logic_set_slot_connecting(cam_idx, true);
+            g_camera_states[cam_idx].connection_state = CAM_STATE_CONNECTING;
+            s_pending_unresponsive_reconnect = cam_idx;
+            g_ui_state.display_needs_update = true;
+            return;
+        }
         // Camera is paired but not connected - mark as connecting and defer to after lock release
         if (g_camera_states[cam_idx].connection_state == CAM_STATE_PAIRED_DISCONNECTED || 
             g_camera_states[cam_idx].connection_state == CAM_STATE_CONNECTING) {
