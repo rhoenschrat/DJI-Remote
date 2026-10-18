@@ -2,7 +2,8 @@
  * Mode Switch Screen module (LVGL).
  *
  * Displays the current camera mode with a large centered icon and text.
- * Button A sends the QS (Quick Switch) command; Button B returns to main.
+ * Button A sends the QS (Quick Switch) command; Button C returns to main
+ * (handled in ui.c); Button B has no function and no widget.
  * Layout positions come from ui_layout_get() for multi-resolution support.
  */
 
@@ -38,7 +39,7 @@ static lv_obj_t    *s_title      = NULL;
 static lv_obj_t    *s_mode_icon  = NULL;
 static lv_obj_t    *s_mode_text  = NULL;
 static btn_widget_t s_btn_a;
-static btn_widget_t s_btn_b;
+static btn_widget_t s_btn_c;
 
 /* ======================================================================
  * Resolution Helper (same as ui_screen_main.c)
@@ -66,23 +67,12 @@ static void create_button(btn_widget_t *b, int btn_idx,
                            const lv_image_dsc_t *ico, const char *lbl) {
     const ui_layout_t *L = ui_layout_get();
 
+    /* Bottom-bar button, same geometry and style as the main screen */
     b->container = lv_obj_create(s_screen);
     lv_obj_remove_style_all(b->container);
-
-    if (L->submenu_btns.column) {
-        lv_obj_set_pos(b->container,
-                       L->submenu_btns.col_x,
-                       L->submenu_btns.col_btn_y[btn_idx]);
-        lv_obj_set_size(b->container, 27, L->submenu_btns.col_btn_h[btn_idx]);
-    } else {
-        lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
-        lv_obj_set_size(b->container, L->btn.w, L->btn.h);
-    }
-
-    lv_color_t bg = L->btn_style.compact
-                    ? L->btn_style.bg_color[btn_idx]
-                    : ui_clr_black();
-    lv_obj_set_style_bg_color(b->container, bg, 0);
+    lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
+    lv_obj_set_size(b->container, L->btn.w, L->btn.h);
+    lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
     lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b->container, 0, 0);
     lv_obj_set_scrollbar_mode(b->container, LV_SCROLLBAR_MODE_OFF);
@@ -91,23 +81,20 @@ static void create_button(btn_widget_t *b, int btn_idx,
     b->icon = lv_image_create(b->container);
     lv_obj_set_pos(b->icon, L->btn_style.icon_ofs_x, L->btn_style.icon_ofs_y);
     lv_image_set_src(b->icon, ico);
-    ui_style_img_recolor(b->icon, L->btn_style.compact ? ui_clr_black() : ui_clr_white());
+    ui_style_img_recolor(b->icon, ui_clr_white());
 
-    /* Rotate Button B (next_icon) 90° CW to point downward on all targets. */
-    if (btn_idx == 1) {
+    /* Rotate Button B (next_icon) 90 deg CW to point downward where the
+     * preset asks for it (vertical single-column lists). */
+    if (btn_idx == 1 && L->submenu.next_icon_rotated) {
         lv_image_set_pivot(b->icon, 12, 12);
         lv_image_set_rotation(b->icon, 900);
     }
 
-    if (!L->btn_style.compact) {
-        b->label = lv_label_create(b->container);
-        lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
-        lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
-        lv_obj_set_style_text_font(b->label, L->font_body, 0);
-        lv_label_set_text(b->label, lbl);
-    } else {
-        b->label = NULL;
-    }
+    b->label = lv_label_create(b->container);
+    lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
+    lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
+    lv_obj_set_style_text_font(b->label, L->font_body, 0);
+    lv_label_set_text(b->label, lbl);
 }
 
 /* ======================================================================
@@ -130,8 +117,8 @@ lv_obj_t *ui_screen_mode_switch_create(int camera_index) {
     lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Title — omitted on 320x170 (column layout uses full height) */
-    if (!L->submenu_btns.column) {
+    /* Title — omitted on 320x170 (content uses the full height) */
+    if (L->submenu.show_title) {
         s_title = lv_label_create(s_screen);
         lv_obj_set_pos(s_title, L->submenu.base_x,
                        L->submenu.base_y + L->submenu.title_ofs_y);
@@ -165,7 +152,7 @@ lv_obj_t *ui_screen_mode_switch_create(int camera_index) {
 
     /* Button bar */
     create_button(&s_btn_a, 0, &lvgl_switch_icon, "Switch");
-    create_button(&s_btn_b, 1, &lvgl_back_icon, "Back");
+    create_button(&s_btn_c, 2, &lvgl_back_icon, "Back");
 
     ui_screen_mode_switch_update();
 
@@ -203,7 +190,7 @@ void ui_screen_mode_switch_destroy(void) {
         s_mode_icon = NULL;
         s_mode_text = NULL;
         memset(&s_btn_a, 0, sizeof(s_btn_a));
-        memset(&s_btn_b, 0, sizeof(s_btn_b));
+        memset(&s_btn_c, 0, sizeof(s_btn_c));
         ESP_LOGI(TAG, "Mode switch screen destroyed");
     }
 }
@@ -245,5 +232,6 @@ void ui_screen_mode_switch_button_a(void) {
 }
 
 void ui_screen_mode_switch_button_b(void) {
-    /* Return to main screen -- handled by ui.c via ui_switch_screen */
+    /* Intentionally empty: Button B has no function on this screen.
+     * Back is Button C, handled in ui.c. */
 }

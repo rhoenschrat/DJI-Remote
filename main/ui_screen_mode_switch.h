@@ -31,6 +31,8 @@ bool ui_screen_mode_switch_is_created(void);
 
 /**
  * Button handlers for mode switch screen (called with lock held).
+ * Button A sends Quick Switch. Button B has no function (no-op).
+ * Button C (Back) is handled directly in ui.c.
  */
 void ui_screen_mode_switch_button_a(void);
 void ui_screen_mode_switch_button_b(void);

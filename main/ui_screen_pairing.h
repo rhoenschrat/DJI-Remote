@@ -30,6 +30,7 @@ bool ui_screen_pairing_is_created(void);
 
 /**
  * Button handlers for pairing screen (called with lock held).
+ * Button C (cancel / Back) is handled directly in ui.c.
  */
 void ui_screen_pairing_button_a(void);
 void ui_screen_pairing_button_b(void);
@@ -43,7 +44,8 @@ void ui_screen_pairing_set_notification(const char *text, lv_color_t color);
 /**
  * Add a discovered camera entry to the pairing screen.
  * @param name Camera name string
- * @param index Index in the discovered list (0-based, maps to entry 1-4)
+ * @param index Index in the discovered list (0-based, equals the entry index).
+ *              May be called again with an existing index to rename it.
  */
 void ui_screen_pairing_add_camera(const char *name, int index);
 
@@ -53,7 +55,7 @@ void ui_screen_pairing_add_camera(const char *name, int index);
 void ui_screen_pairing_reset_cameras(void);
 
 /**
- * Get the current selection index (0=Back, 1-4=camera).
+ * Get the current selection index (= index into the discovered list).
  */
 int ui_screen_pairing_get_selection(void);
 

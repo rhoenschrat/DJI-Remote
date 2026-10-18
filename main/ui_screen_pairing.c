@@ -1,7 +1,10 @@
 /**
  * Pairing Screen module (LVGL).
  *
- * Displays a submenu with discovered cameras for BLE pairing.
+ * Displays a submenu with discovered cameras for BLE pairing. The list
+ * contains only discovered cameras (entry index == discovered index).
+ * Button A pairs the selected camera, Button B moves to the next entry,
+ * Button C cancels the scan and returns to main (handled in ui.c).
  * Layout positions come from ui_layout_get() for multi-resolution support.
  */
 
@@ -40,7 +43,7 @@ typedef struct {
  * Static State
  * ====================================================================== */
 
-#define MAX_PAIRING_ENTRIES 5
+#define MAX_PAIRING_ENTRIES 8   /* 2 x 4 grid on 320x170 */
 
 static lv_obj_t      *s_screen       = NULL;
 static int             s_camera_index = 0;
@@ -48,8 +51,10 @@ static lv_obj_t       *s_title        = NULL;
 static entry_widget_t  s_entries[MAX_PAIRING_ENTRIES];
 static int             s_entry_count  = 0;
 static lv_obj_t       *s_notification = NULL;
+static lv_obj_t       *s_scan_placeholder = NULL;  /* only when notif_w == 0 */
 static btn_widget_t    s_btn_a;
 static btn_widget_t    s_btn_b;
+static btn_widget_t    s_btn_c;
 
 static int  s_selection_index = 0;
 static int  s_discovered_count = 0;
@@ -61,51 +66,69 @@ static int  s_discovered_count = 0;
 static void create_entry(int idx) {
     const ui_layout_t *L = ui_layout_get();
     entry_widget_t *e = &s_entries[idx];
+    int x = ui_submenu_entry_x(L, idx);
     int y = ui_submenu_entry_y(L, idx);
 
     e->indicator = lv_obj_create(s_screen);
     lv_obj_remove_style_all(e->indicator);
-    lv_obj_set_pos(e->indicator, L->submenu.base_x, y);
+    lv_obj_set_pos(e->indicator, x, y);
     lv_obj_set_size(e->indicator, L->submenu.indicator_w, L->submenu.entry_h);
     lv_obj_set_style_bg_color(e->indicator, ui_clr_black(), 0);
     lv_obj_set_style_bg_opa(e->indicator, LV_OPA_COVER, 0);
     lv_obj_clear_flag(e->indicator, LV_OBJ_FLAG_SCROLLABLE);
 
     e->icon = lv_image_create(s_screen);
-    lv_obj_set_pos(e->icon, L->submenu.base_x + L->submenu.icon_ofs_x,
+    lv_obj_set_pos(e->icon, x + L->submenu.icon_ofs_x,
                    y + L->submenu.icon_ofs_y);
-    lv_image_set_src(e->icon, &lvgl_back_icon);
+    lv_image_set_src(e->icon, &lvgl_photo_icon);
     ui_style_img_recolor(e->icon, ui_clr_white());
 
+    /* Fixed width + ellipsis; width is adjusted when a second column opens */
     e->label = lv_label_create(s_screen);
-    lv_obj_set_pos(e->label, L->submenu.base_x + L->submenu.label_ofs_x,
+    lv_obj_set_pos(e->label, x + L->submenu.label_ofs_x,
                    y + L->submenu.label_ofs_y);
+    lv_obj_set_width(e->label, ui_submenu_label_w(L, 0));
+    lv_label_set_long_mode(e->label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(e->label, ui_clr_white(), 0);
     lv_obj_set_style_text_font(e->label, L->font_heading, 0);
     lv_label_set_text(e->label, "");
+}
+
+static void set_entry_visible(int idx, bool visible) {
+    ui_set_visible(s_entries[idx].indicator, visible);
+    ui_set_visible(s_entries[idx].icon, visible);
+    ui_set_visible(s_entries[idx].label, visible);
+}
+
+static int shown_entry_count(void) {
+    return (s_discovered_count < s_entry_count) ? s_discovered_count : s_entry_count;
+}
+
+/* Entry positions never move; only label widths shrink once the list spills
+ * into a second column (and grow back after a reset). */
+static void apply_label_widths(void) {
+    const ui_layout_t *L = ui_layout_get();
+    int32_t w = ui_submenu_label_w(L, shown_entry_count());
+    for (int i = 0; i < s_entry_count; i++) {
+        lv_obj_set_width(s_entries[i].label, w);
+    }
+}
+
+static void update_scan_placeholder(void) {
+    if (s_scan_placeholder == NULL) return;
+    ui_set_visible(s_scan_placeholder, s_discovered_count == 0);
 }
 
 static void create_button(btn_widget_t *b, int btn_idx,
                            const lv_image_dsc_t *ico, const char *lbl) {
     const ui_layout_t *L = ui_layout_get();
 
+    /* Bottom-bar button, same geometry and style as the main screen */
     b->container = lv_obj_create(s_screen);
     lv_obj_remove_style_all(b->container);
-
-    if (L->submenu_btns.column) {
-        lv_obj_set_pos(b->container,
-                       L->submenu_btns.col_x,
-                       L->submenu_btns.col_btn_y[btn_idx]);
-        lv_obj_set_size(b->container, 27, L->submenu_btns.col_btn_h[btn_idx]);
-    } else {
-        lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
-        lv_obj_set_size(b->container, L->btn.w, L->btn.h);
-    }
-
-    lv_color_t bg = L->btn_style.compact
-                    ? L->btn_style.bg_color[btn_idx]
-                    : ui_clr_black();
-    lv_obj_set_style_bg_color(b->container, bg, 0);
+    lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
+    lv_obj_set_size(b->container, L->btn.w, L->btn.h);
+    lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
     lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b->container, 0, 0);
     lv_obj_set_scrollbar_mode(b->container, LV_SCROLLBAR_MODE_OFF);
@@ -114,23 +137,20 @@ static void create_button(btn_widget_t *b, int btn_idx,
     b->icon = lv_image_create(b->container);
     lv_obj_set_pos(b->icon, L->btn_style.icon_ofs_x, L->btn_style.icon_ofs_y);
     lv_image_set_src(b->icon, ico);
-    ui_style_img_recolor(b->icon, L->btn_style.compact ? ui_clr_black() : ui_clr_white());
+    ui_style_img_recolor(b->icon, ui_clr_white());
 
-    /* Rotate Button B (next_icon) 90° CW to point downward on all targets. */
-    if (btn_idx == 1) {
+    /* Rotate Button B (next_icon) 90 deg CW to point downward where the
+     * preset asks for it (vertical single-column lists). */
+    if (btn_idx == 1 && L->submenu.next_icon_rotated) {
         lv_image_set_pivot(b->icon, 12, 12);
         lv_image_set_rotation(b->icon, 900);
     }
 
-    if (!L->btn_style.compact) {
-        b->label = lv_label_create(b->container);
-        lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
-        lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
-        lv_obj_set_style_text_font(b->label, L->font_body, 0);
-        lv_label_set_text(b->label, lbl);
-    } else {
-        b->label = NULL;
-    }
+    b->label = lv_label_create(b->container);
+    lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
+    lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
+    lv_obj_set_style_text_font(b->label, L->font_body, 0);
+    lv_label_set_text(b->label, lbl);
 }
 
 /* ======================================================================
@@ -158,8 +178,8 @@ lv_obj_t *ui_screen_pairing_create(int camera_index) {
     lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Title — omitted on 320x170 (column layout uses full height for entries) */
-    if (!L->submenu_btns.column) {
+    /* Title — omitted on 320x170 (entries use the full height) */
+    if (L->submenu.show_title) {
         s_title = lv_label_create(s_screen);
         lv_obj_set_pos(s_title, L->submenu.base_x,
                        L->submenu.base_y + L->submenu.title_ofs_y);
@@ -172,18 +192,10 @@ lv_obj_t *ui_screen_pairing_create(int camera_index) {
         s_title = NULL;
     }
 
-    /* Menu entries (0=Back, rest=discovered cameras) */
+    /* Menu entries (discovered cameras only) — hidden until found */
     for (int i = 0; i < s_entry_count; i++) {
         create_entry(i);
-    }
-
-    lv_image_set_src(s_entries[0].icon, &lvgl_back_icon);
-    lv_label_set_text(s_entries[0].label, "Back");
-
-    for (int i = 1; i < s_entry_count; i++) {
-        ui_set_visible(s_entries[i].indicator, false);
-        ui_set_visible(s_entries[i].icon, false);
-        ui_set_visible(s_entries[i].label, false);
+        set_entry_visible(i, false);
     }
 
     /* Notification area — omitted on 320x170 (no space) */
@@ -195,13 +207,27 @@ lv_obj_t *ui_screen_pairing_create(int camera_index) {
         lv_obj_set_style_text_font(s_notification, L->font_body, 0);
         lv_label_set_long_mode(s_notification, LV_LABEL_LONG_CLIP);
         lv_label_set_text(s_notification, "Scanning...");
+        s_scan_placeholder = NULL;
     } else {
         s_notification = NULL;
+
+        /* No notification area: show the scan state in the entry area at the
+         * position of entry 0's label until the first camera appears. */
+        s_scan_placeholder = lv_label_create(s_screen);
+        lv_obj_set_pos(s_scan_placeholder,
+                       ui_submenu_entry_x(L, 0) + L->submenu.label_ofs_x,
+                       ui_submenu_entry_y(L, 0) + L->submenu.label_ofs_y);
+        lv_obj_set_width(s_scan_placeholder, ui_submenu_label_w(L, 0));
+        lv_label_set_long_mode(s_scan_placeholder, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_color(s_scan_placeholder, ui_clr_cyan(), 0);
+        lv_obj_set_style_text_font(s_scan_placeholder, L->font_heading, 0);
+        lv_label_set_text(s_scan_placeholder, "Scanning...");
     }
 
     /* Button bar */
     create_button(&s_btn_a, 0, &lvgl_select_icon, "Select");
     create_button(&s_btn_b, 1, &lvgl_next_icon, "Next");
+    create_button(&s_btn_c, 2, &lvgl_back_icon, "Back");
 
     ESP_LOGI(TAG, "Pairing screen created for slot %d", camera_index);
     return s_screen;
@@ -211,10 +237,8 @@ void ui_screen_pairing_update(void) {
     if (s_screen == NULL) return;
 
     for (int i = 0; i < s_entry_count; i++) {
-        bool visible = (i == 0) || (i <= s_discovered_count && i < s_entry_count);
-        ui_set_visible(s_entries[i].indicator, visible);
-        ui_set_visible(s_entries[i].icon, visible);
-        ui_set_visible(s_entries[i].label, visible);
+        bool visible = (i < s_discovered_count);
+        set_entry_visible(i, visible);
 
         if (visible) {
             bool selected = (i == s_selection_index);
@@ -227,6 +251,7 @@ void ui_screen_pairing_update(void) {
         lv_obj_set_style_text_color(s_notification, ui_clr_cyan(), 0);
         lv_label_set_text(s_notification, "Scanning...");
     }
+    update_scan_placeholder();
 }
 
 void ui_screen_pairing_destroy(void) {
@@ -235,9 +260,11 @@ void ui_screen_pairing_destroy(void) {
         s_screen = NULL;
         s_title = NULL;
         s_notification = NULL;
+        s_scan_placeholder = NULL;
         memset(s_entries, 0, sizeof(s_entries));
         memset(&s_btn_a, 0, sizeof(s_btn_a));
         memset(&s_btn_b, 0, sizeof(s_btn_b));
+        memset(&s_btn_c, 0, sizeof(s_btn_c));
         ESP_LOGI(TAG, "Pairing screen destroyed");
     }
 }
@@ -253,11 +280,16 @@ void ui_screen_pairing_set_notification(const char *text, lv_color_t color) {
 }
 
 void ui_screen_pairing_add_camera(const char *name, int index) {
-    if (s_screen == NULL || index < 0 || index >= (s_entry_count - 1)) return;
+    if (s_screen == NULL || index < 0 || index >= s_entry_count) return;
 
-    int entry_idx = index + 1;
-    s_discovered_count = index + 1;
+    /* MAX: this is also called to rename an existing entry, which must not
+     * shrink the count. */
+    int entry_idx = index;
+    if (index + 1 > s_discovered_count) {
+        s_discovered_count = index + 1;
+    }
 
+    /* 23-char cut keeps the 320x240 look; ellipsis handles pixel overflow */
     char truncated[24];
     strncpy(truncated, name, sizeof(truncated) - 1);
     truncated[sizeof(truncated) - 1] = '\0';
@@ -265,10 +297,10 @@ void ui_screen_pairing_add_camera(const char *name, int index) {
     lv_image_set_src(s_entries[entry_idx].icon, &lvgl_photo_icon);
     ui_style_img_recolor(s_entries[entry_idx].icon, ui_clr_white());
     lv_label_set_text(s_entries[entry_idx].label, truncated);
+    set_entry_visible(entry_idx, true);
 
-    ui_set_visible(s_entries[entry_idx].indicator, true);
-    ui_set_visible(s_entries[entry_idx].icon, true);
-    ui_set_visible(s_entries[entry_idx].label, true);
+    apply_label_widths();
+    update_scan_placeholder();
 
     if (s_notification != NULL) {
         lv_label_set_text(s_notification, "");
@@ -278,11 +310,12 @@ void ui_screen_pairing_add_camera(const char *name, int index) {
 void ui_screen_pairing_reset_cameras(void) {
     s_discovered_count = 0;
     s_selection_index = 0;
-    for (int i = 1; i < s_entry_count; i++) {
-        ui_set_visible(s_entries[i].indicator, false);
-        ui_set_visible(s_entries[i].icon, false);
-        ui_set_visible(s_entries[i].label, false);
+    if (s_screen == NULL) return;
+    for (int i = 0; i < s_entry_count; i++) {
+        set_entry_visible(i, false);
     }
+    apply_label_widths();
+    update_scan_placeholder();
 }
 
 int ui_screen_pairing_get_selection(void) {
@@ -302,18 +335,18 @@ void ui_screen_pairing_button_a(void) {
 }
 
 void ui_screen_pairing_button_b(void) {
-    int max_selection = (s_discovered_count < (s_entry_count - 1))
-                            ? s_discovered_count : (s_entry_count - 1);
+    int shown = shown_entry_count();
+    if (shown == 0) return;
+
+    /* Navigation order = index order = column-major fill order */
     s_selection_index++;
-    if (s_selection_index > max_selection) {
+    if (s_selection_index >= shown) {
         s_selection_index = 0;
     }
 
-    for (int i = 0; i < s_entry_count; i++) {
-        if (!lv_obj_has_flag(s_entries[i].indicator, LV_OBJ_FLAG_HIDDEN)) {
-            bool selected = (i == s_selection_index);
-            lv_obj_set_style_bg_color(s_entries[i].indicator,
-                                       selected ? ui_clr_red() : ui_clr_black(), 0);
-        }
+    for (int i = 0; i < shown; i++) {
+        bool selected = (i == s_selection_index);
+        lv_obj_set_style_bg_color(s_entries[i].indicator,
+                                   selected ? ui_clr_red() : ui_clr_black(), 0);
     }
 }

@@ -2,7 +2,8 @@
  * Camera Settings Screen module (LVGL).
  *
  * Displays a submenu with per-camera actions (Mode Switch, Sleep/Wake,
- * Connect/Disconnect, Pair/Unpair).
+ * Connect/Disconnect, Pair/Unpair). Button A selects, Button B moves to the
+ * next entry, Button C returns to the main screen (handled in ui.c).
  * Layout positions come from ui_layout_get() for multi-resolution support.
  */
 
@@ -35,16 +36,15 @@ typedef struct {
  * Static State
  * ====================================================================== */
 
-#define MAX_SETTINGS_ENTRIES 5
-
 static lv_obj_t       *s_screen       = NULL;
 static int             s_camera_index = 0;
 static lv_obj_t       *s_title        = NULL;
-static entry_widget_t  s_entries[MAX_SETTINGS_ENTRIES];
+static entry_widget_t  s_entries[SETTINGS_ITEM_COUNT];
 static int             s_entry_count  = 0;
 static lv_obj_t       *s_notification = NULL;
 static btn_widget_t    s_btn_a;
 static btn_widget_t    s_btn_b;
+static btn_widget_t    s_btn_c;
 static int             s_selection_index = 0;
 
 /* ======================================================================
@@ -54,26 +54,30 @@ static int             s_selection_index = 0;
 static void create_entry(int idx) {
     const ui_layout_t *L = ui_layout_get();
     entry_widget_t *e = &s_entries[idx];
+    int x = ui_submenu_entry_x(L, idx);
     int y = ui_submenu_entry_y(L, idx);
 
     e->indicator = lv_obj_create(s_screen);
     lv_obj_remove_style_all(e->indicator);
-    lv_obj_set_pos(e->indicator, L->submenu.base_x, y);
+    lv_obj_set_pos(e->indicator, x, y);
     lv_obj_set_size(e->indicator, L->submenu.indicator_w, L->submenu.entry_h);
     lv_obj_set_style_bg_color(e->indicator, ui_clr_black(), 0);
     lv_obj_set_style_bg_opa(e->indicator, LV_OPA_COVER, 0);
     lv_obj_clear_flag(e->indicator, LV_OBJ_FLAG_SCROLLABLE);
 
     e->icon = lv_image_create(s_screen);
-    lv_obj_set_pos(e->icon, L->submenu.base_x + L->submenu.icon_ofs_x,
+    lv_obj_set_pos(e->icon, x + L->submenu.icon_ofs_x,
                    y + L->submenu.icon_ofs_y);
     ui_style_img_recolor(e->icon, ui_clr_white());
 
+    /* Fixed width + ellipsis so long text never overflows its column */
     e->label = lv_label_create(s_screen);
-    lv_obj_set_pos(e->label, L->submenu.base_x + L->submenu.label_ofs_x,
+    lv_obj_set_pos(e->label, x + L->submenu.label_ofs_x,
                    y + L->submenu.label_ofs_y);
+    lv_obj_set_width(e->label, ui_submenu_label_w(L, s_entry_count));
+    lv_label_set_long_mode(e->label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(e->label, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(e->label, ui_layout_get()->font_heading, 0);
+    lv_obj_set_style_text_font(e->label, L->font_heading, 0);
     lv_label_set_text(e->label, "");
 }
 
@@ -81,23 +85,12 @@ static void create_button(btn_widget_t *b, int btn_idx,
                            const lv_image_dsc_t *ico, const char *lbl) {
     const ui_layout_t *L = ui_layout_get();
 
+    /* Bottom-bar button, same geometry and style as the main screen */
     b->container = lv_obj_create(s_screen);
     lv_obj_remove_style_all(b->container);
-
-    if (L->submenu_btns.column) {
-        lv_obj_set_pos(b->container,
-                       L->submenu_btns.col_x,
-                       L->submenu_btns.col_btn_y[btn_idx]);
-        lv_obj_set_size(b->container, 27, L->submenu_btns.col_btn_h[btn_idx]);
-    } else {
-        lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
-        lv_obj_set_size(b->container, L->btn.w, L->btn.h);
-    }
-
-    lv_color_t bg = L->btn_style.compact
-                    ? L->btn_style.bg_color[btn_idx]
-                    : ui_clr_black();
-    lv_obj_set_style_bg_color(b->container, bg, 0);
+    lv_obj_set_pos(b->container, L->btn.x[btn_idx], L->btn.y);
+    lv_obj_set_size(b->container, L->btn.w, L->btn.h);
+    lv_obj_set_style_bg_color(b->container, ui_clr_black(), 0);
     lv_obj_set_style_bg_opa(b->container, LV_OPA_COVER, 0);
     lv_obj_set_style_pad_all(b->container, 0, 0);
     lv_obj_set_scrollbar_mode(b->container, LV_SCROLLBAR_MODE_OFF);
@@ -106,23 +99,20 @@ static void create_button(btn_widget_t *b, int btn_idx,
     b->icon = lv_image_create(b->container);
     lv_obj_set_pos(b->icon, L->btn_style.icon_ofs_x, L->btn_style.icon_ofs_y);
     lv_image_set_src(b->icon, ico);
-    ui_style_img_recolor(b->icon, L->btn_style.compact ? ui_clr_black() : ui_clr_white());
+    ui_style_img_recolor(b->icon, ui_clr_white());
 
-    /* Rotate Button B (next_icon) 90° CW to point downward on all targets. */
-    if (btn_idx == 1) {
+    /* Rotate Button B (next_icon) 90 deg CW to point downward where the
+     * preset asks for it (vertical single-column lists). */
+    if (btn_idx == 1 && L->submenu.next_icon_rotated) {
         lv_image_set_pivot(b->icon, 12, 12);
         lv_image_set_rotation(b->icon, 900);
     }
 
-    if (!L->btn_style.compact) {
-        b->label = lv_label_create(b->container);
-        lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
-        lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
-        lv_obj_set_style_text_font(b->label, L->font_body, 0);
-        lv_label_set_text(b->label, lbl);
-    } else {
-        b->label = NULL;
-    }
+    b->label = lv_label_create(b->container);
+    lv_obj_set_pos(b->label, L->btn.label_ofs_x, L->btn.label_ofs_y);
+    lv_obj_set_style_text_color(b->label, ui_clr_white(), 0);
+    lv_obj_set_style_text_font(b->label, L->font_body, 0);
+    lv_label_set_text(b->label, lbl);
 }
 
 /* ======================================================================
@@ -140,8 +130,8 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     s_camera_index = camera_index;
     s_selection_index = 0;
     s_entry_count = L->submenu.max_entries;
-    if (s_entry_count > MAX_SETTINGS_ENTRIES)
-        s_entry_count = MAX_SETTINGS_ENTRIES;
+    if (s_entry_count > SETTINGS_ITEM_COUNT)
+        s_entry_count = SETTINGS_ITEM_COUNT;
 
     s_screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(s_screen, ui_clr_black(), 0);
@@ -149,8 +139,8 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     lv_obj_set_scrollbar_mode(s_screen, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(s_screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Title — omitted on 320x170 (column layout uses full height for entries) */
-    if (!L->submenu_btns.column) {
+    /* Title — omitted on 320x170 (entries use the full height) */
+    if (L->submenu.show_title) {
         s_title = lv_label_create(s_screen);
         lv_obj_set_pos(s_title, L->submenu.base_x,
                        L->submenu.base_y + L->submenu.title_ofs_y);
@@ -168,15 +158,9 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
         create_entry(i);
     }
 
-    /* Entry 0: Back */
-    lv_image_set_src(s_entries[0].icon, &lvgl_back_icon);
-    lv_label_set_text(s_entries[0].label, "Back");
-
-    /* Entry 1: Mode Switch */
-    if (s_entry_count > 1) {
-        lv_image_set_src(s_entries[1].icon, &lvgl_switch_icon);
-        lv_label_set_text(s_entries[1].label, "Mode Switch");
-    }
+    /* Static entry: Mode Switch */
+    lv_image_set_src(s_entries[SETTINGS_ITEM_MODE_SWITCH].icon, &lvgl_switch_icon);
+    lv_label_set_text(s_entries[SETTINGS_ITEM_MODE_SWITCH].label, "Mode Switch");
 
     /* Notification area — omitted on 320x170 (no space) */
     if (L->submenu.notif_w > 0) {
@@ -194,6 +178,7 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     /* Button bar */
     create_button(&s_btn_a, 0, &lvgl_select_icon, "Select");
     create_button(&s_btn_b, 1, &lvgl_next_icon, "Next");
+    create_button(&s_btn_c, 2, &lvgl_back_icon, "Back");
 
     /* Initial dynamic update */
     ui_screen_settings_update();
@@ -207,37 +192,40 @@ void ui_screen_settings_update(void) {
 
     const camera_state_t *cam = &g_camera_states[s_camera_index];
 
-    /* Entry 2: Sleep/Wakeup */
-    if (s_entry_count > 2) {
+    /* Sleep/Wakeup */
+    if (s_entry_count > SETTINGS_ITEM_SLEEP_WAKEUP) {
+        entry_widget_t *e = &s_entries[SETTINGS_ITEM_SLEEP_WAKEUP];
         bool is_sleeping = (cam->power_mode == 3) || cam->is_sleeping;
         if (is_sleeping) {
-            lv_image_set_src(s_entries[2].icon, &lvgl_wakeup_icon);
-            lv_label_set_text(s_entries[2].label, "Wakeup");
+            lv_image_set_src(e->icon, &lvgl_wakeup_icon);
+            lv_label_set_text(e->label, "Wakeup");
         } else {
-            lv_image_set_src(s_entries[2].icon, &lvgl_sleep_icon);
-            lv_label_set_text(s_entries[2].label, "Sleep");
+            lv_image_set_src(e->icon, &lvgl_sleep_icon);
+            lv_label_set_text(e->label, "Sleep");
         }
     }
 
-    /* Entry 3: Connect/Disconnect */
-    if (s_entry_count > 3) {
+    /* Connect/Disconnect */
+    if (s_entry_count > SETTINGS_ITEM_CONNECT_DISCONNECT) {
+        entry_widget_t *e = &s_entries[SETTINGS_ITEM_CONNECT_DISCONNECT];
         if (cam->connection_state == CAM_STATE_CONNECTED) {
-            lv_image_set_src(s_entries[3].icon, &lvgl_disconnect_icon);
-            lv_label_set_text(s_entries[3].label, "Disconnect");
+            lv_image_set_src(e->icon, &lvgl_disconnect_icon);
+            lv_label_set_text(e->label, "Disconnect");
         } else {
-            lv_image_set_src(s_entries[3].icon, &lvgl_connect_icon);
-            lv_label_set_text(s_entries[3].label, "Connect");
+            lv_image_set_src(e->icon, &lvgl_connect_icon);
+            lv_label_set_text(e->label, "Connect");
         }
     }
 
-    /* Entry 4: Pair/Unpair */
-    if (s_entry_count > 4) {
+    /* Pair/Unpair */
+    if (s_entry_count > SETTINGS_ITEM_PAIR_UNPAIR) {
+        entry_widget_t *e = &s_entries[SETTINGS_ITEM_PAIR_UNPAIR];
         if (cam->is_paired) {
-            lv_image_set_src(s_entries[4].icon, &lvgl_unpair_icon);
-            lv_label_set_text(s_entries[4].label, "Unpair");
+            lv_image_set_src(e->icon, &lvgl_unpair_icon);
+            lv_label_set_text(e->label, "Unpair");
         } else {
-            lv_image_set_src(s_entries[4].icon, &lvgl_pair_icon);
-            lv_label_set_text(s_entries[4].label, "Pair Camera");
+            lv_image_set_src(e->icon, &lvgl_pair_icon);
+            lv_label_set_text(e->label, "Pair Camera");
         }
     }
 
@@ -262,6 +250,7 @@ void ui_screen_settings_destroy(void) {
         memset(s_entries, 0, sizeof(s_entries));
         memset(&s_btn_a, 0, sizeof(s_btn_a));
         memset(&s_btn_b, 0, sizeof(s_btn_b));
+        memset(&s_btn_c, 0, sizeof(s_btn_c));
         ESP_LOGI(TAG, "Settings screen destroyed");
     }
 }

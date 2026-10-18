@@ -3,7 +3,8 @@
  *
  * All screen modules read positions and sizes from a ui_layout_t struct
  * initialized once at startup from the LVGL display resolution.
- * Presets: 320x240 (M5Stack Basic v2.7), 240x135 (M5StickC Plus2).
+ * Presets: 320x240 (M5Stack Basic v2.7), 320x170 (Waveshare ESP32-S3-LCD-1.9),
+ *          240x135 (M5StickC Plus2).
  *
  * Also provides shared LVGL colour and style helpers so that screen
  * modules do not duplicate boilerplate inline functions.
@@ -70,10 +71,12 @@ typedef struct {
         int32_t label_ofs_y;
     } btn;
 
-    /* Submenu screens (pairing, settings) */
+    /* Submenu screens (pairing, settings, mode switch).
+     * Entries form a column-major grid of `rows` x `columns`; buttons A/B/C
+     * always use the bottom bar (btn.* / btn_style.*). */
     struct {
         int32_t base_x, base_y;
-        int32_t w;
+        int32_t w;                 /* full entry-area width (single column) */
         int32_t title_ofs_y;
         int32_t entry_h;
         int32_t entry_first_y;
@@ -83,12 +86,18 @@ typedef struct {
         int32_t icon_ofs_y;
         int32_t label_ofs_x;
         int32_t label_ofs_y;
-        int32_t max_entries;
+        int32_t max_entries;       /* must equal rows * columns */
+        int32_t rows;              /* rows per column */
+        int32_t columns;           /* max columns (1 or 2) */
+        int32_t col_w;             /* width of one column in multi-column mode */
+        bool    show_title;        /* "Camera N" title above the entries */
+        bool    next_icon_rotated; /* rotate Button B next_icon 90 deg CW (points down) */
         int32_t notif_x, notif_y;
-        int32_t notif_w;
+        int32_t notif_w;           /* 0 = no notification area */
     } submenu;
 
-    /* Compact button bar (320x170): square icon-only buttons, no label */
+    /* Button bar style (main screen and submenu screens). compact == true
+     * selects square icon-only buttons; all current presets use false. */
     struct {
         bool       compact;          /* true = 27x27 square, false = wide with label */
         lv_color_t bg_color[3];      /* per-button background colors */
@@ -96,14 +105,6 @@ typedef struct {
         int32_t    icon_ofs_y;       /* icon y offset within button */
         int32_t    icon_size;        /* icon size (20 for 320x170) */
     } btn_style;
-
-    /* Submenu button column (320x170: vertical right-edge column) */
-    struct {
-        bool    column;              /* true = right-edge column, false = bottom bar */
-        int32_t col_x;              /* x of the column */
-        int32_t col_btn_h[3];       /* height of each button slot */
-        int32_t col_btn_y[3];       /* y of each button slot */
-    } submenu_btns;
 
     /* Mode switch screen */
     struct {
@@ -156,9 +157,25 @@ static inline int32_t ui_cam_block_x(const ui_layout_t *L, int idx) {
     return L->cam.x_start;
 }
 
-/* Compute the y position for a submenu entry (absolute). */
+/* Right margin between a submenu entry label and its column edge. */
+#define UI_SUBMENU_LABEL_MARGIN_R 4
+
+/* Submenu entry origin (absolute). Entries fill column-major: the left
+ * column top to bottom first, then the next column. */
+static inline int32_t ui_submenu_entry_x(const ui_layout_t *L, int idx) {
+    return L->submenu.base_x + (idx / L->submenu.rows) * L->submenu.col_w;
+}
+
 static inline int32_t ui_submenu_entry_y(const ui_layout_t *L, int idx) {
-    return L->submenu.entry_first_y + idx * L->submenu.entry_spacing;
+    return L->submenu.entry_first_y + (idx % L->submenu.rows) * L->submenu.entry_spacing;
+}
+
+/* Label width for all entries given the number of currently shown entries.
+ * Up to `rows` entries form a single column spanning submenu.w; more entries
+ * switch to multi-column mode where every label is limited to col_w. */
+static inline int32_t ui_submenu_label_w(const ui_layout_t *L, int shown) {
+    int32_t span = (shown > L->submenu.rows) ? L->submenu.col_w : L->submenu.w;
+    return span - L->submenu.label_ofs_x - UI_SUBMENU_LABEL_MARGIN_R;
 }
 
 #endif /* UI_LAYOUT_H */

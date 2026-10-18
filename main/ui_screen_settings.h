@@ -4,13 +4,12 @@
 #include "lvgl.h"
 #include <stdbool.h>
 
-/* Settings menu item indices */
-#define SETTINGS_ITEM_BACK              0
-#define SETTINGS_ITEM_MODE_SWITCH       1
-#define SETTINGS_ITEM_SLEEP_WAKEUP      2
-#define SETTINGS_ITEM_CONNECT_DISCONNECT 3
-#define SETTINGS_ITEM_PAIR_UNPAIR       4
-#define SETTINGS_ITEM_COUNT             5
+/* Settings menu item indices (Back is Button C, not a list entry) */
+#define SETTINGS_ITEM_MODE_SWITCH        0
+#define SETTINGS_ITEM_SLEEP_WAKEUP       1
+#define SETTINGS_ITEM_CONNECT_DISCONNECT 2
+#define SETTINGS_ITEM_PAIR_UNPAIR        3
+#define SETTINGS_ITEM_COUNT              4
 
 /**
  * Create the Settings screen LVGL widget tree.
@@ -38,6 +37,7 @@ bool ui_screen_settings_is_created(void);
 
 /**
  * Button handlers for settings screen (called with lock held).
+ * Button C (Back) is handled directly in ui.c.
  */
 void ui_screen_settings_button_a(void);
 void ui_screen_settings_button_b(void);
