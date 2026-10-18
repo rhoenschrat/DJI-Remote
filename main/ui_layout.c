@@ -3,7 +3,10 @@
  *
  * Three presets are provided:
  *   - 320x240 (M5Stack Basic v2.7)        — 3-column main screen, 5-entry submenus
- *   - 320x170 (Waveshare ESP32-S3-LCD-1.9) — 3-column, compact buttons, no vmode
+ *   - 320x170 (Waveshare ESP32-S3-LCD-1.9) — 3-column main, M5Stack-style bottom
+ *                                            buttons + GPS icon at far left,
+ *                                            bottom-row buttons and 2x4 entry
+ *                                            grid on submenus
  *   - 240x135 (M5StickC Plus2)             — 1-column main screen, 3-entry submenus
  *
  * The 240x135 preset is designed but not yet hardware-tested.
@@ -102,16 +105,14 @@ static void init_layout_320x240(ui_layout_t *L) {
     L->submenu.label_ofs_x   = 44;
     L->submenu.label_ofs_y   = 4;
     L->submenu.max_entries   = 5;
+    L->submenu.rows          = 5;
+    L->submenu.columns       = 1;
+    L->submenu.col_w         = 300;
+    L->submenu.show_title    = true;
+    L->submenu.next_icon_rotated = true;
     L->submenu.notif_x       = 15;
     L->submenu.notif_y       = 189;
     L->submenu.notif_w       = 290;
-
-    /* Submenu buttons — standard bottom bar */
-    L->submenu_btns.column      = false;
-    L->submenu_btns.col_x       = 0;
-    L->submenu_btns.col_btn_y[0] = 0;  L->submenu_btns.col_btn_h[0] = 0;
-    L->submenu_btns.col_btn_y[1] = 0;  L->submenu_btns.col_btn_h[1] = 0;
-    L->submenu_btns.col_btn_y[2] = 0;  L->submenu_btns.col_btn_h[2] = 0;
 
     /* Mode switch */
     L->mode.icon_ofs_y  = 29;
@@ -202,17 +203,17 @@ static void init_layout_240x135(ui_layout_t *L) {
     L->submenu.icon_ofs_y    = 0;
     L->submenu.label_ofs_x   = 38;
     L->submenu.label_ofs_y   = 3;
+    /* Known limitation: Settings has 4 options but only 3 rows fit here,
+     * so Pair/Unpair is unreachable on this (untested) preset. */
     L->submenu.max_entries   = 3;
+    L->submenu.rows          = 3;
+    L->submenu.columns       = 1;
+    L->submenu.col_w         = 230;
+    L->submenu.show_title    = true;
+    L->submenu.next_icon_rotated = true;
     L->submenu.notif_x       = 10;
     L->submenu.notif_y       = 82;
     L->submenu.notif_w       = 220;
-
-    /* Submenu buttons — standard bottom bar */
-    L->submenu_btns.column      = false;
-    L->submenu_btns.col_x       = 0;
-    L->submenu_btns.col_btn_y[0] = 0;  L->submenu_btns.col_btn_h[0] = 0;
-    L->submenu_btns.col_btn_y[1] = 0;  L->submenu_btns.col_btn_h[1] = 0;
-    L->submenu_btns.col_btn_y[2] = 0;  L->submenu_btns.col_btn_h[2] = 0;
 
     /* Mode switch */
     L->mode.icon_ofs_y  = 20;
@@ -262,62 +263,65 @@ static void init_layout_320x170(ui_layout_t *L) {
     L->cam_detail.bat_icon_x = 5;   L->cam_detail.bat_icon_y = 108;
     L->cam_detail.bat_text_x = 34;  L->cam_detail.bat_text_y = 113;
 
-    /* Status bar — merged bottom row */
-    L->status.notif_x    = 99;   L->status.notif_y    = 143;
-    L->status.notif_w    = 189;
-    L->status.gps_icon_x = 291;  L->status.gps_icon_y = 145;
+    /* Status bar — bottom row hosts only the GPS icon now (notification
+     * widget is omitted on this preset; sentinel: notif_w == 0). */
+    L->status.notif_x    = 0;    L->status.notif_y    = 0;
+    L->status.notif_w    = 0;
+    L->status.gps_icon_x = 5;    L->status.gps_icon_y = 145;
     L->status.gps_text_x = 0;    L->status.gps_text_y = 0;
     L->status.gps_fix_color   = lv_color_make(0, 200, 0);  /* Green */
     L->status.gps_text_visible = false;
 
-    /* Button bar — compact 27x27 colored squares */
+    /* Button bar — three equal-share M5Stack-style buttons fill the row
+     * to the right of the GPS icon slot (32 + 3 * 96 = 320). */
     L->btn.y          = 143;
-    L->btn.w          = 27;
+    L->btn.w          = 96;
     L->btn.h          = 27;
-    L->btn.x[0]       = 5;
-    L->btn.x[1]       = 36;
-    L->btn.x[2]       = 67;
-    L->btn.label_ofs_x = 0;
-    L->btn.label_ofs_y = 0;
+    L->btn.x[0]       = 32;
+    L->btn.x[1]       = 128;
+    L->btn.x[2]       = 224;
+    L->btn.label_ofs_x = 29;   /* 24 (icon w) + 5 (gap) */
+    L->btn.label_ofs_y = 7;    /* visual centre of montserrat_14 in 27 px row */
 
-    /* Button style — compact colored squares */
-    L->btn_style.compact    = true;
-    L->btn_style.bg_color[0] = lv_color_make(255, 0, 0);
-    L->btn_style.bg_color[1] = lv_color_make(255, 255, 0);
-    L->btn_style.bg_color[2] = lv_color_make(0, 0, 255);
-    L->btn_style.icon_ofs_x = 2;
-    L->btn_style.icon_ofs_y = 2;
-    L->btn_style.icon_size  = 20;
+    /* Button style — wide M5Stack style (icon + text label), shared by the
+     * main screen and all submenu screens. */
+    L->btn_style.compact    = false;
+    L->btn_style.bg_color[0] = lv_color_black();   /* unused when compact == false */
+    L->btn_style.bg_color[1] = lv_color_black();
+    L->btn_style.bg_color[2] = lv_color_black();
+    L->btn_style.icon_ofs_x = 0;
+    L->btn_style.icon_ofs_y = 1;     /* 1 px inset to centre 24 px icon in 27 px row */
+    L->btn_style.icon_size  = 24;
 
-    /* Submenu layout — no title, full-height entries */
+    /* Submenu layout — no title, 2 columns x 4 rows (column-major) above the
+     * bottom button row at y = 143. Rows at y = 1/36/71/106, the last ends
+     * at 140 (3 px gap to the button row). */
     L->submenu.base_x        = 0;
     L->submenu.base_y        = 0;
-    L->submenu.w             = 288;
+    L->submenu.w             = 320;
     L->submenu.title_ofs_y   = 0;
     L->submenu.entry_h       = 34;
-    L->submenu.entry_first_y = 0;
-    L->submenu.entry_spacing = 34;
+    L->submenu.entry_first_y = 1;
+    L->submenu.entry_spacing = 35;
     L->submenu.indicator_w   = 4;
     L->submenu.icon_ofs_x    = 10;
     L->submenu.icon_ofs_y    = 5;
     L->submenu.label_ofs_x   = 38;
     L->submenu.label_ofs_y   = 9;
-    L->submenu.max_entries   = 5;
+    L->submenu.max_entries   = 8;
+    L->submenu.rows          = 4;
+    L->submenu.columns       = 2;
+    L->submenu.col_w         = 160;
+    L->submenu.show_title    = false;
+    L->submenu.next_icon_rotated = false;
     L->submenu.notif_x       = 0;
     L->submenu.notif_y       = 0;
     L->submenu.notif_w       = 0;  /* no separate notification area */
 
-    /* Submenu buttons — vertical right-edge column */
-    L->submenu_btns.column      = true;
-    L->submenu_btns.col_x       = 293;
-    /* Three 27x27 squares grouped tightly at top, 4px gap between each */
-    L->submenu_btns.col_btn_y[0] = 3;    L->submenu_btns.col_btn_h[0] = 27;
-    L->submenu_btns.col_btn_y[1] = 34;   L->submenu_btns.col_btn_h[1] = 27;
-    L->submenu_btns.col_btn_y[2] = 65;   L->submenu_btns.col_btn_h[2] = 27;
-
-    /* Mode switch */
-    L->mode.icon_ofs_y  = 40;
-    L->mode.label_ofs_y = 85;
+    /* Mode switch — icon + 2-line text centred vertically in the 143 px
+     * area above the button row */
+    L->mode.icon_ofs_y  = 28;
+    L->mode.label_ofs_y = 73;
 }
 
 /* ---------------------------------------------------------------------- */

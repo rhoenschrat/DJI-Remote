@@ -1606,103 +1606,110 @@ void ui_pairing_update_discovered_camera_name(const char *name, const uint8_t *m
 static void ui_return_to_main_screen(void);
 
 /**
- * @brief Handle button press on pairing screen
+ * @brief Cancel an active pairing scan and return to the main screen
+ *
+ * Bound to Button C (Back) on the pairing screen.
+ */
+static void ui_cancel_pairing_and_return(void) {
+    g_pairing_scan_active = false;
+    ble_stop_scan();
+    g_discovered_camera_count = 0;
+    memset(g_discovered_cameras, 0, sizeof(g_discovered_cameras));
+    ESP_LOGI(TAG, "Pairing cancelled, returning to main screen");
+    ui_return_to_main_screen();
+}
+
+/**
+ * @brief Handle button A press on pairing screen
+ *
+ * Pairs the selected discovered camera. No-op while nothing is discovered.
  */
 static void ui_handle_pairing_screen_button_a(void) {
     int sel = ui_screen_pairing_get_selection();
     int active_slot = ui_screen_pairing_get_camera_index();
 
-    if (sel == 0) {
+    int camera_idx = sel;
+    if (camera_idx >= 0 && camera_idx < g_discovered_camera_count &&
+        g_discovered_cameras[camera_idx].is_valid) {
+
+        ESP_LOGI(TAG, "Pairing camera: %s to slot %d",
+                 g_discovered_cameras[camera_idx].name, active_slot);
+
+        camera_state_t *cam = &g_camera_states[active_slot];
+        cam->is_paired = true;
+        strncpy(cam->camera_name, g_discovered_cameras[camera_idx].name, sizeof(cam->camera_name) - 1);
+        cam->camera_name[sizeof(cam->camera_name) - 1] = '\0';
+        memcpy(cam->camera_mac, g_discovered_cameras[camera_idx].mac, 6);
+        cam->device_id = g_discovered_cameras[camera_idx].device_id;
+        cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
+        cam->camera_reserved = active_slot;
+        cam->camera_supports_new_status_push = false;
+        cam->mode_name[0] = '\0';
+        cam->mode_param[0] = '\0';
+        cam->last_mode_name[0] = '\0';
+        cam->last_mode_param[0] = '\0';
+
+        ESP_LOGI(TAG, "Camera %d paired: %s (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
+                 active_slot, cam->camera_name,
+                 cam->camera_mac[0], cam->camera_mac[1], cam->camera_mac[2],
+                 cam->camera_mac[3], cam->camera_mac[4], cam->camera_mac[5]);
+
+        esp_err_t save_err = save_all_cameras_to_nvs();
+        if (save_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to save camera pairings to NVS: %s", esp_err_to_name(save_err));
+        }
+
+        if (active_slot == 0) {
+            g_stored_camera.is_paired = cam->is_paired;
+            strncpy(g_stored_camera.camera_name, cam->camera_name, sizeof(g_stored_camera.camera_name));
+            memcpy(g_stored_camera.camera_mac, cam->camera_mac, 6);
+            g_stored_camera.device_id = cam->device_id;
+            g_stored_camera.camera_reserved = cam->camera_reserved;
+        }
+
+        cam->connection_state = CAM_STATE_CONNECTING;
         g_pairing_scan_active = false;
         ble_stop_scan();
         g_discovered_camera_count = 0;
         memset(g_discovered_cameras, 0, sizeof(g_discovered_cameras));
-        ESP_LOGI(TAG, "Pairing cancelled, returning to main screen");
-        ui_return_to_main_screen();
-    } else {
-        int camera_idx = sel - 1;
-        if (camera_idx >= 0 && camera_idx < g_discovered_camera_count &&
-            g_discovered_cameras[camera_idx].is_valid) {
 
-            ESP_LOGI(TAG, "Pairing camera: %s to slot %d",
-                     g_discovered_cameras[camera_idx].name, active_slot);
+        ESP_LOGI(TAG, "Initiating connection to newly paired camera %d", active_slot);
+        ui_screen_pairing_set_notification("Pairing... Confirm on Camera",
+                                            lv_color_make(0, 255, 255));
+        lvgl_port_unlock();
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        lvgl_port_lock(0);
 
-            camera_state_t *cam = &g_camera_states[active_slot];
-            cam->is_paired = true;
-            strncpy(cam->camera_name, g_discovered_cameras[camera_idx].name, sizeof(cam->camera_name) - 1);
-            cam->camera_name[sizeof(cam->camera_name) - 1] = '\0';
-            memcpy(cam->camera_mac, g_discovered_cameras[camera_idx].mac, 6);
-            cam->device_id = g_discovered_cameras[camera_idx].device_id;
-            cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-            cam->camera_reserved = active_slot;
-            cam->camera_supports_new_status_push = false;
-            cam->mode_name[0] = '\0';
-            cam->mode_param[0] = '\0';
-            cam->last_mode_name[0] = '\0';
-            cam->last_mode_param[0] = '\0';
+        g_verify_mode = 1;
 
-            ESP_LOGI(TAG, "Camera %d paired: %s (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
-                     active_slot, cam->camera_name,
-                     cam->camera_mac[0], cam->camera_mac[1], cam->camera_mac[2],
-                     cam->camera_mac[3], cam->camera_mac[4], cam->camera_mac[5]);
+        int connect_result = ui_perform_complete_reconnection(active_slot, true);
 
-            esp_err_t save_err = save_all_cameras_to_nvs();
-            if (save_err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to save camera pairings to NVS: %s", esp_err_to_name(save_err));
-            }
-
-            if (active_slot == 0) {
-                g_stored_camera.is_paired = cam->is_paired;
-                strncpy(g_stored_camera.camera_name, cam->camera_name, sizeof(g_stored_camera.camera_name));
-                memcpy(g_stored_camera.camera_mac, cam->camera_mac, 6);
-                g_stored_camera.device_id = cam->device_id;
-                g_stored_camera.camera_reserved = cam->camera_reserved;
-            }
-
-            cam->connection_state = CAM_STATE_CONNECTING;
-            g_pairing_scan_active = false;
-            ble_stop_scan();
-            g_discovered_camera_count = 0;
-            memset(g_discovered_cameras, 0, sizeof(g_discovered_cameras));
-
-            ESP_LOGI(TAG, "Initiating connection to newly paired camera %d", active_slot);
-            ui_screen_pairing_set_notification("Pairing... Confirm on Camera",
-                                                lv_color_make(0, 255, 255));
+        if (connect_result == 0) {
+            ESP_LOGI(TAG, "Pairing and connection successful for camera %d", active_slot);
+            ui_screen_pairing_set_notification("Pairing Complete!",
+                                                lv_color_make(0, 255, 0));
             lvgl_port_unlock();
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(1500));
             lvgl_port_lock(0);
-
-            g_verify_mode = 1;
-
-            int connect_result = ui_perform_complete_reconnection(active_slot, true);
-
-            if (connect_result == 0) {
-                ESP_LOGI(TAG, "Pairing and connection successful for camera %d", active_slot);
-                ui_screen_pairing_set_notification("Pairing Complete!",
-                                                    lv_color_make(0, 255, 0));
-                lvgl_port_unlock();
-                vTaskDelay(pdMS_TO_TICKS(1500));
-                lvgl_port_lock(0);
-            } else {
-                ESP_LOGW(TAG, "Pairing connection failed for camera %d", active_slot);
-                cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
-                ui_screen_pairing_set_notification("Pairing Failed - Retry from Settings",
-                                                    lv_color_make(255, 0, 0));
-                lvgl_port_unlock();
-                vTaskDelay(pdMS_TO_TICKS(2500));
-                lvgl_port_lock(0);
-            }
-
-            ui_return_to_main_screen();
+        } else {
+            ESP_LOGW(TAG, "Pairing connection failed for camera %d", active_slot);
+            cam->connection_state = CAM_STATE_PAIRED_DISCONNECTED;
+            ui_screen_pairing_set_notification("Pairing Failed - Retry from Settings",
+                                                lv_color_make(255, 0, 0));
+            lvgl_port_unlock();
+            vTaskDelay(pdMS_TO_TICKS(2500));
+            lvgl_port_lock(0);
         }
+
+        ui_return_to_main_screen();
     }
 }
 
 /**
  * @brief Handle button B press on pairing screen
  * 
- * Cycles through selections using partial redraw (selection indicators only).
- * Selection wraps from entry 4 back to entry 0.
+ * Cycles through the discovered cameras (column-major order) and wraps
+ * after the last visible entry.
  */
 static void ui_handle_pairing_screen_button_b(void) {
     ui_screen_pairing_button_b();
@@ -1800,8 +1807,8 @@ static void ui_handle_mode_switch_button_a(void) {
 }
 
 static void ui_handle_mode_switch_button_b(void) {
-    ESP_LOGI(TAG, "Mode Switch: Back button pressed, returning to Main Screen");
-    ui_return_to_main_screen();
+    /* Button B has no function on the Mode Switch screen (Back is Button C) */
+    ESP_LOGD(TAG, "Mode Switch: Button B ignored");
 }
 
 /**
@@ -1813,11 +1820,6 @@ static void ui_handle_settings_screen_button_a(void) {
     camera_state_t *cam = &g_camera_states[active_slot];
 
     switch (sel) {
-        case SETTINGS_ITEM_BACK:
-            ESP_LOGI(TAG, "Settings: Back selected");
-            ui_return_to_main_screen();
-            break;
-
         case SETTINGS_ITEM_MODE_SWITCH:
             ESP_LOGI(TAG, "Settings: Mode Switch selected for camera %d", active_slot + 1);
             g_mode_switch_camera_index = active_slot;
@@ -1952,7 +1954,7 @@ static void ui_handle_settings_screen_button_a(void) {
 /**
  * @brief Handle button B press on settings screen
  * 
- * Cycles through selections using partial redraw (selection indicators only).
+ * Cycles through the settings entries and wraps after the last visible entry.
  */
 static void ui_handle_settings_screen_button_b(void) {
     ui_screen_settings_button_b();
@@ -2093,12 +2095,34 @@ void ui_handle_button_b(void) {
 
 /**
  * @brief Handle Button C press (screen-aware)
- * Button C opens pairing or settings screen from main screen
+ * Submenu screens (Pairing, Settings, Mode Switch): Back to the main screen
+ * (Pairing additionally stops the scan).
+ * Main screen: opens pairing or settings screen.
  * Special behavior: During active boot scan, stops scan and connects to found cameras
  * Highlight Tag: If camera is recording and highlight-capable, sends highlight tag command
  */
 void ui_handle_button_c(void) {
     lvgl_port_lock(0);
+    /* Submenu screens: Button C = Back. The esp_lvgl_port lock is recursive,
+     * so ui_switch_screen() may be called with it held (same as Button A). */
+    switch (g_ui_state.current_screen) {
+        case SCREEN_PAIRING:
+            ui_cancel_pairing_and_return();
+            lvgl_port_unlock();
+            return;
+        case SCREEN_CAMERA_SETTINGS:
+            ESP_LOGI(TAG, "Settings: Back (Button C), returning to Main Screen");
+            ui_return_to_main_screen();
+            lvgl_port_unlock();
+            return;
+        case SCREEN_MODE_SWITCH:
+            ESP_LOGI(TAG, "Mode Switch: Back (Button C), returning to Main Screen");
+            ui_return_to_main_screen();
+            lvgl_port_unlock();
+            return;
+        default:
+            break;
+    }
     if (g_ui_state.current_screen != SCREEN_MAIN) {
         lvgl_port_unlock();
         return;

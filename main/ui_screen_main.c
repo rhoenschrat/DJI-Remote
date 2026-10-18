@@ -253,13 +253,19 @@ static void create_camera_block(int idx) {
 static void create_status_bar(void) {
     const ui_layout_t *L = ui_layout_get();
 
-    s_notification = lv_label_create(s_screen);
-    lv_obj_set_pos(s_notification, L->status.notif_x, L->status.notif_y);
-    lv_obj_set_width(s_notification, L->status.notif_w);
-    lv_obj_set_style_text_color(s_notification, ui_clr_white(), 0);
-    lv_obj_set_style_text_font(s_notification, L->font_body, 0);
-    lv_label_set_long_mode(s_notification, LV_LABEL_LONG_CLIP);
-    lv_label_set_text(s_notification, "");
+    /* Notification widget — omitted on presets where notif_w == 0
+     * (e.g. 320x170, where the bottom row has no space for it). */
+    if (L->status.notif_w > 0) {
+        s_notification = lv_label_create(s_screen);
+        lv_obj_set_pos(s_notification, L->status.notif_x, L->status.notif_y);
+        lv_obj_set_width(s_notification, L->status.notif_w);
+        lv_obj_set_style_text_color(s_notification, ui_clr_white(), 0);
+        lv_obj_set_style_text_font(s_notification, L->font_body, 0);
+        lv_label_set_long_mode(s_notification, LV_LABEL_LONG_CLIP);
+        lv_label_set_text(s_notification, "");
+    } else {
+        s_notification = NULL;
+    }
 
     s_gps_icon = lv_image_create(s_screen);
     lv_obj_set_pos(s_gps_icon, L->status.gps_icon_x, L->status.gps_icon_y);

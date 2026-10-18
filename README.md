@@ -173,46 +173,80 @@ for the full wiring diagram and GPS module connection.
 
 # Building the Firmware (ESP-IDF)
 
-## 1. Install ESP-IDF
+The project brings its own toolchain: ESP-IDF v5.5.1 is installed into
+`.idf/` inside the project folder (git-ignored). Nothing is installed
+globally and your shell configuration is not touched.
 
-Follow the official guide:
-https://docs.espressif.com/projects/esp-idf/en/latest/esp32/
+## 1. Prerequisites
 
-Export environment:
+- git
+- Python 3.10 or newer
+- optional: [direnv](https://direnv.net) for automatic activation
 
+macOS (Homebrew):
 ```bash
-. $HOME/esp/esp-idf/export.sh
+brew install python@3.12 direnv
 ```
 
-## 2. Build for M5Stack Basic V2.7 (ESP32)
+Linux: install `git`, `python3` (3.10+), `python3-venv` and optionally
+`direnv` via your package manager.
+
+## 2. Install the Toolchain (once per clone)
 
 ```bash
-idf.py fullclean
-idf.py set-target esp32
+tools/idf/setup.sh
+```
+
+Downloads ESP-IDF and the toolchains for ESP32 and ESP32-S3 (~4 GB on disk,
+takes a few minutes). Safe to re-run; `--force` reinstalls from scratch.
+The ESP-IDF version is pinned in `tools/idf/env.sh`.
+
+## 3. Run idf.py
+
+Either use the wrapper, which works from anywhere without setup:
+```bash
+./idf build
+```
+
+Or enable direnv once, then `idf.py` is available whenever you are inside
+the project folder:
+```bash
+direnv allow
+idf.py build
+```
+
+## 4. Build for M5Stack Basic V2.7 (ESP32)
+
+```bash
 cp sdkconfig.defaults.m5stack_basic_v27 sdkconfig.defaults
-idf.py build
+./idf fullclean
+./idf set-target esp32
+./idf build
 ```
 
-## 3. Build for Waveshare ESP32-S3-LCD-1.9 (ESP32-S3)
+## 5. Build for Waveshare ESP32-S3-LCD-1.9 (ESP32-S3)
 
 ```bash
-idf.py fullclean
-idf.py set-target esp32s3
 cp sdkconfig.defaults.waveshare_s3_lcd19 sdkconfig.defaults
-idf.py build
+./idf fullclean
+./idf set-target esp32s3
+./idf build
 ```
 
-## 4. Flash
+Copy the defaults file *before* `fullclean`/`set-target` so the board
+selection is applied.
 
-Linux/macOS:
+## 6. Flash
+
+macOS / Linux:
 ```bash
-idf.py -p /dev/ttyUSB0 flash monitor
+./idf -p /dev/cu.usbserial-XXXX flash monitor   # macOS
+./idf -p /dev/ttyUSB0 flash monitor             # Linux
 ```
 
-Windows:
-```cmd
-idf.py -p COM3 flash monitor
-```
+Windows is not covered by `tools/idf/setup.sh`. Install ESP-IDF v5.5.1 with
+the [official installer](https://docs.espressif.com/projects/esp-idf/en/v5.5.1/esp32/get-started/windows-setup.html)
+and use `idf.py` from the ESP-IDF command prompt.
 
 
 # Web Flash (Easiest)
