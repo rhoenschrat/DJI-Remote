@@ -850,6 +850,7 @@ void ui_auto_connect_on_startup(void) {
 }
 
 static void ui_detect_device_and_set_scale(void);
+static void ui_slot_shutter_action(int cam_idx, bool wake_via_queue);
 
 /**
  * @brief Initialize the complete user interface system
@@ -1899,26 +1900,52 @@ void ui_execute_main_screen_action(void) {
  * release. true: CLICK fires on release (held < BUTTON_LONG_PRESS_MS), LONG
  * at the threshold. false: CLICK fires on press, never LONG (ADR-024).
  *
- * Plan 0015 assigns no long-press functions yet, so this returns false for
- * every button and screen. Plan 0016 fills it in per screen.
+ * Main screen: A/B/C long press = shutter action on slot 0/1/2 (plan 0016).
+ * Not during the boot scan: the long press is ignored there, and returning
+ * false keeps Button C "Stop" firing on press. Every other screen: false.
  */
 bool ui_button_has_long_press(button_id_t btn) {
-    (void)btn;
-    return false;
+    ui_screen_t screen = g_ui_state.current_screen;
+    if ((unsigned)btn >= BTN_COUNT || screen != SCREEN_MAIN) {
+        return false;
+    }
+    return !connect_logic_is_boot_scan_active();
 }
 
-/* Long-press handlers: empty until plan 0016 assigns functions. Unreachable
- * while ui_button_has_long_press() returns false. */
-static void ui_handle_button_a_long(void) {
-    ESP_LOGD(TAG, "Button A long press: no function assigned");
-}
+/**
+ * @brief Long press on the main screen: shutter action on a fixed slot
+ *
+ * Button A/B/C -> slot 0/1/2, independent of the camera selection (which is
+ * not changed). Behaves like a short Button A press with that slot selected,
+ * but only for a connected slot: empty, disconnected, connecting and
+ * unresponsive slots are ignored silently (no pairing, reconnect or recovery
+ * by long press). A sleeping slot is woken through the wake queue.
+ */
+static void ui_handle_slot_long_press(button_id_t btn, int slot) {
+    static const char btn_name[] = { 'A', 'B', 'C' };
 
-static void ui_handle_button_b_long(void) {
-    ESP_LOGD(TAG, "Button B long press: no function assigned");
-}
+    if (slot < 0 || slot >= NUM_CAMERAS) {
+        return;
+    }
+    /* The screen or the boot scan may have changed between press and
+     * threshold */
+    if (g_ui_state.current_screen != SCREEN_MAIN || connect_logic_is_boot_scan_active()) {
+        ESP_LOGD(TAG, "Button %c long press ignored: not on main screen or boot scan active",
+                 btn_name[btn]);
+        return;
+    }
 
-static void ui_handle_button_c_long(void) {
-    ESP_LOGD(TAG, "Button C long press: no function assigned");
+    lvgl_port_lock(0);
+    camera_connection_state_t state = g_camera_states[slot].connection_state;
+    if (state != CAM_STATE_CONNECTED) {
+        lvgl_port_unlock();
+        ESP_LOGD(TAG, "Button %c long press ignored: slot %d not connected (state %d)",
+                 btn_name[btn], slot, (int)state);
+        return;
+    }
+    ESP_LOGI(TAG, "Button %c long press: slot %d", btn_name[btn], slot);
+    ui_slot_shutter_action(slot, true);
+    lvgl_port_unlock();
 }
 
 /**
@@ -1936,11 +1963,9 @@ void ui_handle_button_event(button_id_t btn, button_event_t ev) {
             default: break;
         }
     } else if (ev == BTN_EVENT_LONG) {
-        switch (btn) {
-            case BTN_A: ui_handle_button_a_long(); break;
-            case BTN_B: ui_handle_button_b_long(); break;
-            case BTN_C: ui_handle_button_c_long(); break;
-            default: break;
+        /* Only the main screen has long-press functions: A/B/C -> slot 0/1/2 */
+        if ((unsigned)btn < BTN_COUNT) {
+            ui_handle_slot_long_press(btn, (int)btn);
         }
     }
 }
@@ -2054,6 +2079,128 @@ void ui_show_not_connected_message(void) {
  * Called when automatic reconnection fails, initiating a fresh pairing
  * process that requires user interaction on the camera side.
  */
+/**
+ * @brief Shutter action for one connected slot
+ *
+ * The per-slot primitive behind a short Button A press in single-camera mode
+ * and a long press on the main screen (A/B/C -> slot 0/1/2):
+ * - sleeping -> wake + snapshot (snapshot key is sent by status logic on wake)
+ * - photo mode -> photo; recording -> stop; otherwise -> start
+ * Commands go to the slot's worker (ADR-020); never waits on the main task.
+ *
+ * Caller holds the LVGL lock and has checked CAM_STATE_CONNECTED.
+ *
+ * @param cam_idx        Slot 0..2
+ * @param wake_via_queue true: a sleeping slot is woken through the wake queue
+ *                       (long press); false: direct broadcast (short press)
+ */
+static void ui_slot_shutter_action(int cam_idx, bool wake_via_queue) {
+    camera_state_t *cam_state = &g_camera_states[cam_idx];
+    
+    // Check if camera is in sleep mode (use per-camera state)
+    bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
+    
+    if (is_sleeping) {
+        // Camera is asleep - initiate snapshot mode
+        // Single camera mode: send wake broadcast immediately, snapshot key is sent
+        // automatically when camera wakes (power_mode 3 → 0) via status update handler
+        ESP_LOGI(TAG, "LOGIC_STATUS: Camera %d: Snapshot requested while sleeping. Starting wake-up broadcast.", cam_idx);
+        
+        // Check if snapshot is already pending (avoid stacking multiple requests)
+        if (cam_state->snapshot_pending) {
+            ESP_LOGW(TAG, "Camera %d: snapshot_pending already set, ignoring duplicate request", cam_idx);
+            return;
+        }
+        
+        if (wake_via_queue) {
+            /* Long press: there is only one advertising instance, so a direct
+             * broadcast would overwrite one that is already running (wake
+             * queue in All Cameras mode, or a second long press within 3 s).
+             * The wake queue serialises broadcasts, starts within one main
+             * loop cycle when idle and handles timeout and retry itself. A
+             * direct broadcast from a short press that gets overwritten is
+             * retried by ui_process_single_camera_wake_timeout() once the
+             * queue is idle again. */
+            if (!wake_queue_add(cam_idx)) {
+                ESP_LOGW(TAG, "Camera %d: could not add to wake queue", cam_idx);
+                return;
+            }
+            cam_state->snapshot_pending = true;
+            cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            cam_state->wake_retry_count = 0;
+            g_wake_queue.queue_active = true;
+            ESP_LOGI(TAG, "Camera %d: snapshot_pending SET (long press, added to wake queue)", cam_idx);
+            char qmsg[32];
+            snprintf(qmsg, sizeof(qmsg), "Waking camera %d for snapshot...", cam_idx);
+            ui_show_shutter_bottom_message(qmsg, M5_COLOR_YELLOW, 2000);
+            g_ui_state.display_needs_update = true;
+            return;
+        }
+
+        // Set snapshot pending flag and record timestamp
+        cam_state->snapshot_pending = true;
+        cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        cam_state->wake_retry_count = 0;  // Reset retry counter for new request
+        ESP_LOGI(TAG, "Camera %d: snapshot_pending SET (single camera mode)", cam_idx);
+        ESP_LOGD(TAG, "Camera %d: last_snapshot_request_ms = %lu", cam_idx, cam_state->last_snapshot_request_ms);
+        
+        // Start wake-up broadcast for this camera slot
+        extern esp_err_t connect_logic_start_wake_broadcast_for_slot(int camera_index);
+        esp_err_t wake_result = connect_logic_start_wake_broadcast_for_slot(cam_idx);
+        if (wake_result != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start wake broadcast for camera %d, aborting snapshot request: %s", 
+                     cam_idx, esp_err_to_name(wake_result));
+            // Clear snapshot pending since we couldn't initiate the wake sequence
+            cam_state->snapshot_pending = false;
+            ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (wake broadcast failed to start)", cam_idx);
+            ui_show_shutter_bottom_message("Snapshot failed: wake error", M5_COLOR_RED, 2000);
+            return;
+        }
+        
+        // Show notification that we're waking the camera for snapshot
+        char msg[32];
+        snprintf(msg, sizeof(msg), "Waking camera %d for snapshot...", cam_idx);
+        ui_show_shutter_bottom_message(msg, M5_COLOR_YELLOW, 2000);
+        
+        // Mark UI for update to reflect any state changes
+        g_ui_state.display_needs_update = true;
+        
+        // Don't send recording command - snapshot key will be sent automatically when camera wakes
+        // (handled in status update code when power_mode changes from 3 to 0)
+        return;
+    }
+    
+    // Camera is awake - proceed with normal recording logic
+    
+    /* Check if camera status has been received for mode-aware operation */
+    if (!cam_state->is_initialized) {
+        ESP_LOGW(TAG, "Camera %d status not yet initialized, attempting command anyway", cam_idx);
+        ui_post_shutter_message("Status Unknown\nTrying...", M5_COLOR_ORANGE, 1000);
+    }
+    
+    /* Determine shutter behavior based on current camera mode */
+    camera_mode_t current_mode = (camera_mode_t)cam_state->camera_mode;
+    
+    ESP_LOGI(TAG, "Current camera mode: %d, status: %d, recording: %s", 
+             current_mode, cam_state->camera_status, cam_state->is_recording ? "yes" : "no");
+    
+    /* The command runs on the slot's worker; the result message is posted
+     * by ui_process_command_results() (ADR-020). Photo mode uses the same
+     * record-start command. */
+    cmd_job_t job;
+    if (current_mode == CAMERA_MODE_PHOTO) {
+        ESP_LOGI(TAG, "Taking photo in photo mode");
+        job = CMD_JOB_RECORD_START;
+    } else if (cam_state->is_recording) {
+        ESP_LOGI(TAG, "Stopping recording in video mode");
+        job = CMD_JOB_RECORD_STOP;
+    } else {
+        ESP_LOGI(TAG, "Starting recording in video mode");
+        job = CMD_JOB_RECORD_START;
+    }
+    post_submit_feedback(ui_submit_job(cam_idx, job, true), NULL, 0);
+}
+
 /**
  * @brief Handle main screen activation (shutter control)
  * 
@@ -2242,86 +2389,8 @@ void ui_screen_main(void) {
         }
     }
     
-    // Get camera state for the selected camera
-    camera_state_t *cam_state = &g_camera_states[cam_idx];
-    
-    // Check if camera is in sleep mode (use per-camera state)
-    bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
-    
-    if (is_sleeping) {
-        // Camera is asleep - initiate snapshot mode
-        // Single camera mode: send wake broadcast immediately, snapshot key is sent
-        // automatically when camera wakes (power_mode 3 → 0) via status update handler
-        ESP_LOGI(TAG, "LOGIC_STATUS: Camera %d: Snapshot requested while sleeping. Starting wake-up broadcast.", cam_idx);
-        
-        // Check if snapshot is already pending (avoid stacking multiple requests)
-        if (cam_state->snapshot_pending) {
-            ESP_LOGW(TAG, "Camera %d: snapshot_pending already set, ignoring duplicate request", cam_idx);
-            return;
-        }
-        
-        // Set snapshot pending flag and record timestamp
-        cam_state->snapshot_pending = true;
-        cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        cam_state->wake_retry_count = 0;  // Reset retry counter for new request
-        ESP_LOGI(TAG, "Camera %d: snapshot_pending SET (single camera mode)", cam_idx);
-        ESP_LOGD(TAG, "Camera %d: last_snapshot_request_ms = %lu", cam_idx, cam_state->last_snapshot_request_ms);
-        
-        // Start wake-up broadcast for this camera slot
-        extern esp_err_t connect_logic_start_wake_broadcast_for_slot(int camera_index);
-        esp_err_t wake_result = connect_logic_start_wake_broadcast_for_slot(cam_idx);
-        if (wake_result != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start wake broadcast for camera %d, aborting snapshot request: %s", 
-                     cam_idx, esp_err_to_name(wake_result));
-            // Clear snapshot pending since we couldn't initiate the wake sequence
-            cam_state->snapshot_pending = false;
-            ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (wake broadcast failed to start)", cam_idx);
-            ui_show_shutter_bottom_message("Snapshot failed: wake error", M5_COLOR_RED, 2000);
-            return;
-        }
-        
-        // Show notification that we're waking the camera for snapshot
-        char msg[32];
-        snprintf(msg, sizeof(msg), "Waking camera %d for snapshot...", cam_idx);
-        ui_show_shutter_bottom_message(msg, M5_COLOR_YELLOW, 2000);
-        
-        // Mark UI for update to reflect any state changes
-        g_ui_state.display_needs_update = true;
-        
-        // Don't send recording command - snapshot key will be sent automatically when camera wakes
-        // (handled in status update code when power_mode changes from 3 to 0)
-        return;
-    }
-    
-    // Camera is awake - proceed with normal recording logic
-    
-    /* Check if camera status has been received for mode-aware operation */
-    if (!cam_state->is_initialized) {
-        ESP_LOGW(TAG, "Camera %d status not yet initialized, attempting command anyway", cam_idx);
-        ui_post_shutter_message("Status Unknown\nTrying...", M5_COLOR_ORANGE, 1000);
-    }
-    
-    /* Determine shutter behavior based on current camera mode */
-    camera_mode_t current_mode = (camera_mode_t)cam_state->camera_mode;
-    
-    ESP_LOGI(TAG, "Current camera mode: %d, status: %d, recording: %s", 
-             current_mode, cam_state->camera_status, cam_state->is_recording ? "yes" : "no");
-    
-    /* The command runs on the slot's worker; the result message is posted
-     * by ui_process_command_results() (ADR-020). Photo mode uses the same
-     * record-start command. */
-    cmd_job_t job;
-    if (current_mode == CAMERA_MODE_PHOTO) {
-        ESP_LOGI(TAG, "Taking photo in photo mode");
-        job = CMD_JOB_RECORD_START;
-    } else if (cam_state->is_recording) {
-        ESP_LOGI(TAG, "Stopping recording in video mode");
-        job = CMD_JOB_RECORD_STOP;
-    } else {
-        ESP_LOGI(TAG, "Starting recording in video mode");
-        job = CMD_JOB_RECORD_START;
-    }
-    post_submit_feedback(ui_submit_job(cam_idx, job, true), NULL, 0);
+    // Connected: same primitive as the long press on this slot
+    ui_slot_shutter_action(cam_idx, false);
 }
 
 /* ================== Wake-Up Queue Management ================== */

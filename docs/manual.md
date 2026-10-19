@@ -13,12 +13,14 @@ This manual explains how to operate the DJI-Remote device, covering startup beha
 The remote has three buttons, **A**, **B** and **C**. Their function depends on
 the screen and is shown in the bottom row of the display.
 
-- A button reacts as soon as it is pressed (after a short check of about
-  0.1 s that filters out contact bounce and electrical glitches).
+- On the **Main Screen**, a button reacts when it is **released**, because
+  each button also has a **long-press** function there (see below). On all
+  other screens, a button reacts as soon as it is pressed.
+- Every press is checked for about 0.1 s, which filters out contact bounce
+  and electrical glitches.
 - Holding a button does **not** repeat the action and does not stop the
   remote: the display, the recording timer and the camera connections keep
-  running while a button is held. Long-press functions will be added in a
-  later version.
+  running while a button is held.
 - You can press buttons quickly one after another (e.g. **Next**): every
   press counts, there is no waiting time after releasing a button.
 - A button that is already pressed when the remote starts is ignored until it
@@ -26,8 +28,33 @@ the screen and is shown in the bottom row of the display.
 - A button that is held for more than 10 seconds (e.g. squeezed in a bag)
   triggers nothing further until it is released.
 - **External buttons (M5Stack, optional):** buttons wired to G26 (A), G21 (B)
-  and G22 (C) behave exactly like the built-in buttons on every screen. There
-  is no extra delay or cooldown for them.
+  and G22 (C) behave exactly like the built-in buttons on every screen,
+  including long press. There is no extra delay or cooldown for them.
+
+### Long Press on the Main Screen: Record on One Camera
+
+Hold a button for **1.5 seconds** to control one camera directly, without
+changing the camera selection:
+
+| Hold | Camera |
+|------|--------|
+| **Button A** | Camera 1 (left) |
+| **Button B** | Camera 2 (middle) |
+| **Button C** | Camera 3 (right) |
+
+The action happens as soon as 1.5 s are reached; releasing the button
+afterwards does nothing more. It works like Button A with that camera
+selected:
+
+- not recording → **start recording** (in photo mode: take a photo)
+- recording → **stop recording**
+- asleep → **wake up and take a snapshot**
+
+The long press works with every selection, including **All Cameras**. If the
+camera is not connected (empty slot, disconnected, connecting or not
+responding), the long press is ignored. It does not pair or reconnect a
+camera, and it does nothing while the remote is still searching for cameras
+after startup.
 
 
 # 1. Starting the Remote
@@ -106,6 +133,10 @@ Press **Button A**:
 - If not recording → **Start recording**
 - If recording → **Stop recording**
 
+To control **another** camera without changing the selection, hold its
+button for 1.5 s (A = Camera 1, B = Camera 2, C = Camera 3; see
+"Long Press on the Main Screen").
+
 
 ## 2.3 Adding Highlight Tags
 
@@ -162,6 +193,10 @@ Press **Button A**:
 - Otherwise → **Start all**
 
 Sleeping cameras are awakened automatically and sequentially when needed.
+
+To start or stop **one** camera while **All Cameras** stays selected, hold its
+button for 1.5 s: **A** = Camera 1, **B** = Camera 2, **C** = Camera 3. The
+other cameras are not affected.
 
 
 ## 3.2 Sleep & Wake All Cameras
