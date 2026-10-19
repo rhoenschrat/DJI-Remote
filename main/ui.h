@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "button_sm.h"
 #include "connect_logic.h"
 #include "ui_screen_main.h"
 #include "ui_screen_pairing.h"
@@ -165,7 +166,6 @@ void ui_process_command_results(void);
 void ui_show_not_connected_message(void);
 const char* ui_get_camera_model_name(uint32_t device_id);
 esp_err_t save_all_cameras_to_nvs(void);
-void ui_process_pending_gpio_actions(void);
 void ui_process_link_events(void);
 void ui_process_wake_queue(void);
 void ui_process_single_camera_wake_timeout(void);
@@ -198,9 +198,13 @@ void ui_pairing_add_discovered_camera(const char *name, const uint8_t *mac, int8
 void ui_pairing_update_discovered_camera_name(const char *name, const uint8_t *mac);
 void ui_start_settings(int camera_index);
 
-// Screen-aware button handlers
+// Screen-aware button handlers (CLICK)
 void ui_handle_button_a(void);
 void ui_handle_button_b(void);
 void ui_handle_button_c(void);
+
+// Button event entry point and long-press context (ADR-024)
+bool ui_button_has_long_press(button_id_t btn);
+void ui_handle_button_event(button_id_t btn, button_event_t ev);
 
 #endif // UI_H

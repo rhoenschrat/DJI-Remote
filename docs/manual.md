@@ -8,6 +8,28 @@ This manual explains how to operate the DJI-Remote device, covering startup beha
 > boards.
 
 
+## Using the Buttons
+
+The remote has three buttons, **A**, **B** and **C**. Their function depends on
+the screen and is shown in the bottom row of the display.
+
+- A button reacts as soon as it is pressed (after a short check of about
+  0.1 s that filters out contact bounce and electrical glitches).
+- Holding a button does **not** repeat the action and does not stop the
+  remote: the display, the recording timer and the camera connections keep
+  running while a button is held. Long-press functions will be added in a
+  later version.
+- You can press buttons quickly one after another (e.g. **Next**): every
+  press counts, there is no waiting time after releasing a button.
+- A button that is already pressed when the remote starts is ignored until it
+  has been released once.
+- A button that is held for more than 10 seconds (e.g. squeezed in a bag)
+  triggers nothing further until it is released.
+- **External buttons (M5Stack, optional):** buttons wired to G26 (A), G21 (B)
+  and G22 (C) behave exactly like the built-in buttons on every screen. There
+  is no extra delay or cooldown for them.
+
+
 # 1. Starting the Remote
 
 When powering on, the device shows a splash screen and then loads the **Main Screen**.  

@@ -44,7 +44,7 @@ Each board has its own `sdkconfig.defaults.<board>` file.
 
 ## 2.2 External Buttons (Compile-Time Optional)
 
-Controlled by compile-time flag `UI_ENABLE_EXTERNAL_BUTTONS` in `main/ui.c`.
+Controlled by compile-time flag `UI_ENABLE_EXTERNAL_BUTTONS` in `main/button_input.c`.
 
 | Function | GPIO | Notes |
 |----------|------|-------|
@@ -53,6 +53,9 @@ Controlled by compile-time flag `UI_ENABLE_EXTERNAL_BUTTONS` in `main/ui.c`.
 | External Button C | GPIO22 | External 10k pull-up required |
 
 When enabled, these behave identically to internal Buttons A/B/C on all screens.
+They are polled (no interrupts) and run through the same per-button state
+machine as the internal buttons (`main/button_sm.c`, `main/button_input.c`):
+debounce by two samples, click, long press (no release lockout).
 
 ## 2.3 Hardware Abstraction Layer (HAL)
 
@@ -65,8 +68,9 @@ board's HAL is compiled.
 | `main/waveshare_s3_lcd19_hal.c/.h` | Waveshare ESP32-S3-LCD-1.9 (ESP32-S3) |
 
 Both HALs expose the same API: display init, LVGL registration, backlight
-control, and button polling. `app_main.c` uses `HAL_*` preprocessor macros
-to call the active HAL without `#ifdef` chains throughout the code.
+control, and raw button levels. `main/board_hal.h` maps the `HAL_*`
+preprocessor macros to the active HAL, so `app_main.c` and `button_input.c`
+need no `#ifdef` chains.
 
 All UI rendering goes through LVGL. The HAL is responsible only for SPI bus
 setup, ST7789 panel initialization, and LVGL buffer/flush registration.

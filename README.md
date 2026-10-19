@@ -146,11 +146,11 @@ External buttons are controlled at build-time via:
 UI_ENABLE_EXTERNAL_BUTTONS
 ```
 
-Located in `main/ui.c`.
+Located in `main/button_input.c`.
 
 **Enabled (default):**
-- GPIO26 / GPIO21 / GPIO22 configured as inputs with interrupts
-- External and internal buttons work in parallel
+- GPIO26 / GPIO21 / GPIO22 configured as inputs (polled, no interrupts)
+- External and internal buttons work in parallel and behave identically
 
 **Disabled:**
 - External buttons are ignored

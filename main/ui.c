@@ -6,7 +6,6 @@
  * 
  * - Display management and screen rendering
  * - Button-based navigation and function execution
- * - GPIO trigger system for external hardware integration
  * - Camera pairing and connection state management
  * - Persistent storage of camera information using NVS
  * - Device ID generation and management
@@ -19,13 +18,8 @@
  * 4. Sleep - Put camera into sleep mode
  * 5. Wake - Wake camera from sleep using BLE broadcast
  * 
- * GPIO Integration:
- * - G0 (pull LOW): Trigger shutter function
- * - G26 (pull HIGH): Trigger sleep function
- * - G25 (pull HIGH): Trigger wake function
- * 
- * All GPIO triggers include device ID-based randomized delays (1-100ms)
- * to prevent interference when multiple devices are used simultaneously.
+ * Button input: button_input.c samples all internal and external buttons
+ * and calls ui_handle_button_event() with CLICK/LONG events (ADR-024).
  * 
  * Hardware: M5Stack Basic V2.7 (ESP32, 320x240 TFT LCD)
  * Framework: ESP-IDF v5.5 with FreeRTOS
@@ -50,10 +44,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "esp_random.h"
-#include "driver/gpio.h"
-#include "freertos/queue.h"
 #include "esp_lvgl_port.h"
 #include "ui_layout.h"
+#include "button_input.h"
 
 /* Logging tag for ESP_LOG functions */
 #define TAG "UI"
@@ -68,55 +61,6 @@
 #define NVS_DEVICE_ID_KEY "device_id"      /* Key for unique device identifier */
 
 /* Old layout constants removed in Phase 6 -- layout is now in LVGL screen modules. */
-
-/* GPIO pin definitions for external hardware triggers
- * These pins allow external devices to trigger camera functions
- * with randomized delays based on the device's unique ID
- */
-#define GPIO_SHUTTER_PIN    26  /* G26 - Pull LOW to trigger SHUTTER (photo/video) */
-#define GPIO_BUTTON_B_PIN   21  /* G21 - External Button B, Pull LOW to trigger (navigation/selection) */
-#define GPIO_BUTTON_C_PIN   22  /* G22 - External Button C, Pull LOW to trigger (context/enter sub-screens) */
-#define GPIO_SLEEP_PIN     26   /* G26 - Pull HIGH to trigger SLEEP mode */
-#define GPIO_WAKE_PIN      25   /* G25 - Pull HIGH to trigger WAKE from sleep */
-
-/* External Buttons Feature Flag
- * 
- * UI_ENABLE_EXTERNAL_BUTTONS: Compile-time flag to enable/disable external button support
- * 
- * When set to 1:
- *   - External GPIO buttons A/B/C are fully supported (GPIO26, GPIO21, GPIO22)
- *   - User must provide correct hardware wiring, including appropriate pull-up resistors
- *   - GPIO pins are configured as inputs with interrupts
- *   - External button events are processed and routed to UI handlers
- * 
- * When set to 0:
- *   - External buttons are completely disabled
- *   - Firmware never touches GPIO26, GPIO21, or GPIO22
- *   - No GPIO configuration or ISR handlers for external pins
- *   - No external button events are generated or processed
- *   - Internal buttons (GPIO39/38/37) remain fully functional
- * 
- * Default: 1 (external buttons enabled)
- */
-#if defined(CONFIG_BOARD_WAVESHARE_S3_LCD19)
-/* Waveshare ESP32-S3 has no external button header; GPIOs 22/25 do not exist
- * on this chip (used internally for SPI flash/PSRAM interface). */
-#define UI_ENABLE_EXTERNAL_BUTTONS 0
-#else
-#define UI_ENABLE_EXTERNAL_BUTTONS 1
-#endif
-
-/* Enumeration of GPIO trigger types for external hardware integration
- * These correspond to the three main camera functions that can be
- * triggered via GPIO pins with randomized delays
- */
-typedef enum {
-    GPIO_TRIGGER_SHUTTER = 0,    /* Photo capture or video recording toggle */
-    GPIO_TRIGGER_BUTTON_B,       /* Cycle camera selection (mirrors internal Button B) */
-    GPIO_TRIGGER_BUTTON_C,       /* Context/enter sub-screens (mirrors internal Button C) */
-    GPIO_TRIGGER_SLEEP,          /* Put camera into sleep mode */
-    GPIO_TRIGGER_WAKE            /* Wake camera from sleep mode */
-} gpio_trigger_type_t;
 
 /* Legacy structure - kept for backward compatibility */
 typedef struct {
@@ -241,8 +185,8 @@ uint32_t g_wake_broadcast_start_time_ms = 0;  // Timestamp when current broadcas
  * @brief Generate a unique random device identifier
  * 
  * Creates a 32-bit random device ID using ESP32's hardware random number
- * generator. This ID is used for DJI protocol communication and GPIO
- * trigger delay calculation to prevent interference between multiple devices.
+ * generator. This ID identifies the remote in the DJI protocol
+ * (connection request / pairing).
  * 
  * @return 32-bit random device identifier (never zero)
  */
@@ -263,8 +207,8 @@ static uint32_t generate_random_device_id(void) {
  * @brief Save device ID to non-volatile storage for persistence
  * 
  * Stores the device's unique identifier to NVS so it remains consistent
- * across power cycles and reboots. This ensures GPIO trigger delays and
- * protocol communication remain stable.
+ * across power cycles and reboots, so paired cameras keep recognising the
+ * remote.
  * 
  * @param device_id The 32-bit device identifier to save
  * @return ESP_OK on success, ESP_ERR_* on failure
@@ -331,10 +275,8 @@ static esp_err_t load_device_id_from_nvs(uint32_t* device_id) {
  * @brief Initialize device ID on system startup
  * 
  * Handles device ID initialization by either loading an existing ID from NVS
- * or generating a new random ID on first boot. The device ID is used for:
- * - DJI protocol communication
- * - GPIO trigger delay calculation
- * - Multi-device interference prevention
+ * or generating a new random ID on first boot. The device ID identifies the
+ * remote in the DJI protocol (connection request / pairing).
  */
 static void initialize_device_id(void) {
     uint32_t stored_device_id;
@@ -364,371 +306,6 @@ static void initialize_device_id(void) {
     }
     
     ESP_LOGI(TAG, "Device ID initialization complete, final g_device_id: 0x%08X", (unsigned int)g_device_id);
-}
-
-/* GPIO control system components for external hardware integration
- * Implements thread-safe GPIO trigger processing with debouncing and delays
- */
-static QueueHandle_t gpio_trigger_queue = NULL;                              /* FreeRTOS queue for GPIO events */
-static TickType_t last_gpio_trigger[3] = {0, 0, 0};                         /* Per-pin debouncing timestamps */
-static TickType_t last_global_gpio_trigger = 0;                             /* Global cooldown timestamp */
-static volatile gpio_trigger_type_t pending_gpio_action = (gpio_trigger_type_t)-1; /* Pending action for main thread */
-
-/**
- * @brief Calculate device-specific GPIO trigger delay
- * 
- * Generates a consistent but pseudo-random delay (1-100ms) based on the device's
- * unique ID. This prevents multiple devices from triggering simultaneously when
- * connected to the same external trigger source, reducing RF interference and
- * improving reliability in multi-device deployments.
- * 
- * @return Delay in milliseconds (1-100ms range)
- */
-static uint32_t calculate_gpio_delay_ms(void) {
-    /* Safety check: ensure device ID is initialized */
-    if (g_device_id == 0) {
-        ESP_LOGW(TAG, "Device ID not initialized, using default 50ms delay");
-        return 50;
-    }
-    
-    /* Use lower 16 bits of device ID as entropy source for consistent randomization */
-    uint16_t id_hash = (uint16_t)(g_device_id & 0xFFFF);
-    
-    /* Map 16-bit hash (0-65535) to delay range (1-100ms) with minimum 1ms guarantee */
-    uint32_t delay_ms = 1 + ((id_hash * 99) / 65535);
-    
-    ESP_LOGI(TAG, "GPIO trigger delay calculated: %lu ms (based on device ID 0x%08X)", 
-             delay_ms, (unsigned int)g_device_id);
-    
-    return delay_ms;
-}
-
-/* GPIO debouncing and cooldown configuration
- * Aggressive timing to prevent multiple triggers from mechanical switch bounce
- * and to ensure stable operation with external hardware
- */
-#define GPIO_DEBOUNCE_TIME_MS 1000      /* Per-pin debouncing period (1 second) */
-#define GPIO_GLOBAL_COOLDOWN_MS 1000    /* Global cooldown between any GPIO triggers (1 second) */
-
-/**
- * @brief GPIO interrupt service routine
- * 
- * Handles GPIO pin state changes by queuing trigger events for processing
- * in the main task context. The ISR must be kept minimal and fast, so all
- * actual processing is deferred to the GPIO monitor task.
- * 
- * @param arg Pointer to gpio_trigger_type_t indicating which trigger type
- */
-#if UI_ENABLE_EXTERNAL_BUTTONS
-static void IRAM_ATTR gpio_isr_handler(void* arg) {
-    gpio_trigger_type_t trigger_type = (gpio_trigger_type_t)(uintptr_t)arg;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    
-    // Send trigger type to queue for processing in main task
-    xQueueSendFromISR(gpio_trigger_queue, &trigger_type, &xHigherPriorityTaskWoken);
-    
-    if (xHigherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
-    }
-}
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-
-/**
- * @brief Process GPIO trigger with debouncing and delay calculation
- * 
- * Implements comprehensive GPIO trigger processing including:
- * - Per-pin and global debouncing to prevent multiple triggers
- * - Device ID-based delay calculation for multi-device coordination
- * - Thread-safe pending action system for main thread execution
- * 
- * @param trigger_type Type of GPIO trigger to process
- */
-static void process_gpio_trigger(gpio_trigger_type_t trigger_type) {
-    TickType_t current_time = xTaskGetTickCount();
-    TickType_t debounce_ticks = pdMS_TO_TICKS(GPIO_DEBOUNCE_TIME_MS);
-    TickType_t global_cooldown_ticks = pdMS_TO_TICKS(GPIO_GLOBAL_COOLDOWN_MS);
-    
-    // Check for global cooldown (any GPIO trigger within 1 second)
-    if ((current_time - last_global_gpio_trigger) < global_cooldown_ticks) {
-        ESP_LOGW(TAG, "GPIO trigger %d ignored due to global cooldown", trigger_type);
-        return;
-    }
-    
-    // Check for per-pin debouncing
-    if (trigger_type < 3 && (current_time - last_gpio_trigger[trigger_type]) < debounce_ticks) {
-        ESP_LOGW(TAG, "GPIO trigger %d ignored due to pin debouncing", trigger_type);
-        return;
-    }
-    
-    // Check if there's already a pending action
-    if (pending_gpio_action != (gpio_trigger_type_t)-1) {
-        ESP_LOGW(TAG, "GPIO trigger %d ignored, action already pending", trigger_type);
-        return;
-    }
-    
-    // Update timestamps
-    last_global_gpio_trigger = current_time;
-    if (trigger_type < 3) {
-        last_gpio_trigger[trigger_type] = current_time;
-    }
-    
-    uint32_t delay_ms = calculate_gpio_delay_ms();
-    
-    ESP_LOGI(TAG, "GPIO trigger %d processing, delaying %lu ms", trigger_type, delay_ms);
-    
-    // Wait for the calculated delay
-    vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    
-    // Set the pending action for main thread to execute
-    pending_gpio_action = trigger_type;
-    ESP_LOGI(TAG, "GPIO trigger %d ready for execution by main thread", trigger_type);
-}
-
-/**
- * @brief GPIO monitoring task - processes queued GPIO events
- * 
- * FreeRTOS task that receives GPIO trigger events from the ISR queue
- * and processes them with appropriate delays and debouncing. Runs
- * continuously waiting for events.
- * 
- * @param pvParameters Unused task parameter (required by FreeRTOS)
- */
-static void gpio_monitor_task(void* pvParameters) {
-    gpio_trigger_type_t trigger_type;
-    
-    while (1) {
-        if (xQueueReceive(gpio_trigger_queue, &trigger_type, portMAX_DELAY)) {
-            process_gpio_trigger(trigger_type);
-        }
-    }
-}
-
-/**
- * @brief Initialize the complete GPIO trigger system
- * 
- * Sets up GPIO pins, interrupt handlers, debouncing system, and monitoring task.
- * Configures:
- * - G0 (SHUTTER): Input with pull-up, trigger on falling edge (pull to LOW)
- * - G26 (SLEEP): Input with pull-down, trigger on rising edge (pull to HIGH)
- * - G25 (WAKE): Input with pull-down, trigger on rising edge (pull to HIGH)
- * 
- * @return ESP_OK on success, ESP_ERR_* on failure
- */
-static esp_err_t init_gpio_system(void) {
-    esp_err_t ret = ESP_OK;
-    
-    ESP_LOGI(TAG, "Initializing GPIO trigger system");
-    ESP_LOGI(TAG, "Current device ID: 0x%08X", (unsigned int)g_device_id);
-    
-    /* Create FreeRTOS queue for GPIO trigger events (ISR to task communication) */
-    gpio_trigger_queue = xQueueCreate(10, sizeof(gpio_trigger_type_t));
-    if (gpio_trigger_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create GPIO trigger queue");
-        return ESP_FAIL;
-    }
-    
-    /* Initialize debouncing timestamps and pending action state */
-    for (int i = 0; i < 3; i++) {
-        last_gpio_trigger[i] = 0;
-    }
-    last_global_gpio_trigger = 0;
-    pending_gpio_action = (gpio_trigger_type_t)-1;
-    
-    /* Configure GPIO pins with appropriate pull resistors and interrupt types */
-#if UI_ENABLE_EXTERNAL_BUTTONS
-    gpio_config_t io_conf = {};
-    /* G26 (SHUTTER) - Input with internal pull-up resistor
-     * External circuit should pull pin LOW to trigger shutter function
-     */
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;      /* Interrupt on falling edge (HIGH to LOW) */
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_SHUTTER_PIN);
-    io_conf.pull_down_en = 0;
-    io_conf.pull_up_en = 1;
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure SHUTTER GPIO pin");
-        return ret;
-    }
-    
-    /* G21 (BUTTON_B) - External Button B, input with internal pull-up.
-     * External circuit: 10k pull-up to 3.3V, button from G21 to GND.
-     * Press = LOW, so we use falling-edge interrupt.
-     */
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;       // interrupt on falling edge (HIGH -> LOW)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_BUTTON_B_PIN);
-    io_conf.pull_down_en = 0;                    // no internal pulldown
-    io_conf.pull_up_en = 1;                      // internal pull-up enabled in addition to external 10k
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure BUTTON_B GPIO pin");
-        return ret;
-    }
-    
-    /* G22 (BUTTON_C) - External Button C, input with NO internal pull-up/pull-down.
-     * External circuit: 10k pull-up to 3.3V, button from G22 to GND.
-     * Press = LOW, so we use falling-edge interrupt.
-     * Idle level is HIGH (external pull-up), press drives pin LOW.
-     */
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;       // interrupt on falling edge (HIGH -> LOW)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_BUTTON_C_PIN);
-    io_conf.pull_down_en = 0;                    // no internal pulldown
-    io_conf.pull_up_en = 0;                      // no internal pull-up (external 10k provides pull-up)
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure BUTTON_C GPIO pin");
-        return ret;
-    }
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-    
-    /* G26 (SLEEP) - Input with internal pull-down resistor
-     * External circuit should pull pin HIGH to trigger sleep function
-     * DISABLED: External sleep/wake GPIO triggers are not used in this hardware configuration
-     */
-    /*
-    io_conf.intr_type = GPIO_INTR_POSEDGE;      // Interrupt on rising edge (LOW to HIGH)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_SLEEP_PIN);
-    io_conf.pull_down_en = 1;
-    io_conf.pull_up_en = 0;
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure SLEEP GPIO pin");
-        return ret;
-    }
-    */
-    
-    /* G25 (WAKE) - Input with internal pull-down resistor
-     * External circuit should pull pin HIGH to trigger wake function
-     * DISABLED: External sleep/wake GPIO triggers are not used in this hardware configuration
-     */
-    /*
-    io_conf.intr_type = GPIO_INTR_POSEDGE;      // Interrupt on rising edge (LOW to HIGH)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_WAKE_PIN);
-    io_conf.pull_down_en = 1;
-    io_conf.pull_up_en = 0;
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure WAKE GPIO pin");
-        return ret;
-    }
-    */
-    
-    /* Install GPIO interrupt service if not already installed */
-    ret = gpio_install_isr_service(0);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {  /* ESP_ERR_INVALID_STATE = already installed */
-        ESP_LOGE(TAG, "Failed to install GPIO ISR service");
-        return ret;
-    }
-    
-    /* Register interrupt handlers for each GPIO pin with trigger type identification */
-#if UI_ENABLE_EXTERNAL_BUTTONS
-    ret = gpio_isr_handler_add(GPIO_SHUTTER_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_SHUTTER);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add SHUTTER GPIO ISR handler");
-        return ret;
-    }
-    
-    ret = gpio_isr_handler_add(GPIO_BUTTON_B_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_BUTTON_B);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add BUTTON_B GPIO ISR handler");
-        return ret;
-    }
-    
-    ret = gpio_isr_handler_add(GPIO_BUTTON_C_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_BUTTON_C);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add BUTTON_C GPIO ISR handler");
-        return ret;
-    }
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-    
-    /* DISABLED: External sleep/wake GPIO triggers are not used in this hardware configuration */
-    /*
-    ret = gpio_isr_handler_add(GPIO_SLEEP_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_SLEEP);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add SLEEP GPIO ISR handler");
-        return ret;
-    }
-    
-    ret = gpio_isr_handler_add(GPIO_WAKE_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_WAKE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add WAKE GPIO ISR handler");
-        return ret;
-    }
-    */
-    
-    /* Create FreeRTOS task for GPIO event processing with sufficient stack size */
-    BaseType_t task_ret = xTaskCreate(gpio_monitor_task, "gpio_monitor", 4096, NULL, 10, NULL);
-    if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create GPIO monitor task");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI(TAG, "GPIO trigger system initialized successfully");
-    
-#if UI_ENABLE_EXTERNAL_BUTTONS
-    ESP_LOGI(TAG, "External buttons: ENABLED (GPIO26/21/22 mapped to A/B/C)");
-    ESP_LOGI(TAG, "  G26 (Shutter): External Button A, falling-edge trigger, internal pull-up enabled, button to GND");
-    ESP_LOGI(TAG, "  G21 (Button B): External Button B, falling-edge trigger, internal pull-up enabled, external 10k pull-up to 3.3V, button to GND");
-    ESP_LOGI(TAG, "  G22 (Button C): External Button C, falling-edge trigger, external pull-up required");
-    ESP_LOGI(TAG, "External Button A: Routed through UI button dispatch (same as internal Button A)");
-#else
-    ESP_LOGI(TAG, "External buttons: DISABLED (no external GPIOs configured)");
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-    
-    return ESP_OK;
-}
-
-/**
- * @brief Process pending GPIO actions from main thread
- * 
- * This function must be called regularly from the main application loop
- * to execute GPIO-triggered actions in the main thread context. This
- * ensures thread safety by avoiding UI function calls from GPIO tasks.
- */
-void ui_process_pending_gpio_actions(void) {
-    if (pending_gpio_action != (gpio_trigger_type_t)-1) {
-        gpio_trigger_type_t action = pending_gpio_action;
-        pending_gpio_action = (gpio_trigger_type_t)-1; // Clear the pending action first
-        
-        ESP_LOGI(TAG, "Executing pending GPIO action: %d", action);
-        
-        switch (action) {
-#if UI_ENABLE_EXTERNAL_BUTTONS
-            case GPIO_TRIGGER_SHUTTER:
-                ui_handle_button_a();
-                break;
-                
-            case GPIO_TRIGGER_BUTTON_B:
-                ui_handle_button_b();
-                break;
-                
-            case GPIO_TRIGGER_BUTTON_C:
-                ui_handle_button_c();
-                break;
-#else
-            /* External button triggers are disabled - these cases should never be reached */
-            case GPIO_TRIGGER_SHUTTER:
-            case GPIO_TRIGGER_BUTTON_B:
-            case GPIO_TRIGGER_BUTTON_C:
-                ESP_LOGW(TAG, "External button trigger received but external buttons are disabled");
-                break;
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-                
-            case GPIO_TRIGGER_SLEEP:
-                ESP_LOGI(TAG, "SLEEP GPIO trigger - not implemented in single-screen mode");
-                // Sleep command logic can be added here if needed
-                break;
-                
-            case GPIO_TRIGGER_WAKE:
-                ESP_LOGI(TAG, "WAKE GPIO trigger - not implemented in single-screen mode");
-                // Wake command logic can be added here if needed
-                break;
-        }
-    }
 }
 
 /**
@@ -1284,7 +861,6 @@ static void ui_detect_device_and_set_scale(void);
  * - Data layer initialization
  * - Display configuration
  * - Automatic connection attempts
- * - GPIO trigger system setup
  */
 void ui_early_init(void) {
     ESP_LOGI(TAG, "UI early init: NVS, pairings, data layer, boot scan");
@@ -1360,11 +936,10 @@ void ui_init(void) {
     /* Perform initial display update to show Main Screen */
     ui_update_display();
     
-    /* Initialize GPIO trigger system after all other subsystems are ready */
-    esp_err_t gpio_err = init_gpio_system();
-    if (gpio_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize GPIO system: %s", esp_err_to_name(gpio_err));
-        ESP_LOGW(TAG, "Continuing without GPIO triggers");
+    /* External buttons (if enabled); internal buttons are set up by the HAL */
+    esp_err_t btn_err = button_input_init();
+    if (btn_err != ESP_OK) {
+        ESP_LOGW(TAG, "Continuing without external buttons: %s", esp_err_to_name(btn_err));
     }
     
     /* Initialize wake-up queue for serialized wake broadcasts */
@@ -2311,10 +1886,63 @@ void ui_handle_button_c(void) {
 /**
  * @brief Execute main screen button action
  * 
- * Wrapper function used for GPIO triggers.
+ * Same as a Button A click.
  */
 void ui_execute_main_screen_action(void) {
     ui_handle_button_a();
+}
+
+/**
+ * @brief Whether the current context assigns a long-press function to a button
+ *
+ * Read by button_input when a press is accepted; the answer is latched until
+ * release. true: CLICK fires on release (held < BUTTON_LONG_PRESS_MS), LONG
+ * at the threshold. false: CLICK fires on press, never LONG (ADR-024).
+ *
+ * Plan 0015 assigns no long-press functions yet, so this returns false for
+ * every button and screen. Plan 0016 fills it in per screen.
+ */
+bool ui_button_has_long_press(button_id_t btn) {
+    (void)btn;
+    return false;
+}
+
+/* Long-press handlers: empty until plan 0016 assigns functions. Unreachable
+ * while ui_button_has_long_press() returns false. */
+static void ui_handle_button_a_long(void) {
+    ESP_LOGD(TAG, "Button A long press: no function assigned");
+}
+
+static void ui_handle_button_b_long(void) {
+    ESP_LOGD(TAG, "Button B long press: no function assigned");
+}
+
+static void ui_handle_button_c_long(void) {
+    ESP_LOGD(TAG, "Button C long press: no function assigned");
+}
+
+/**
+ * @brief Route a button event from button_input to the screen-aware handlers
+ *
+ * Main task only. Handlers take the LVGL lock themselves; button-triggered
+ * camera commands still go through command_worker_submit() (ADR-020).
+ */
+void ui_handle_button_event(button_id_t btn, button_event_t ev) {
+    if (ev == BTN_EVENT_CLICK) {
+        switch (btn) {
+            case BTN_A: ui_handle_button_a(); break;
+            case BTN_B: ui_handle_button_b(); break;
+            case BTN_C: ui_handle_button_c(); break;
+            default: break;
+        }
+    } else if (ev == BTN_EVENT_LONG) {
+        switch (btn) {
+            case BTN_A: ui_handle_button_a_long(); break;
+            case BTN_B: ui_handle_button_b_long(); break;
+            case BTN_C: ui_handle_button_c_long(); break;
+            default: break;
+        }
+    }
 }
 
 /**

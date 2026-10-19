@@ -26,6 +26,11 @@ camera with a problem no longer affects the others or the remote.
   remote sent the time of its own clock, which was never set (1970). Note:
   the cameras store this GPS time one hour earlier than UTC in the clip
   metadata; the time in DJI Mimo comes from the camera clock and is correct.
+- **Buttons no longer block the remote** — While a button is held, the
+  display, the recording timer and the camera connections keep running.
+  Short electrical glitches are filtered out. External buttons on the M5Stack
+  (G26/G21/G22) now behave exactly like the built-in buttons, without the
+  previous 1 s cooldown.
 
 ### Update Notes
 
