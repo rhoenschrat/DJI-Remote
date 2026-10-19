@@ -109,8 +109,8 @@ typedef struct __attribute__((packed)) {
 } camera_power_mode_switch_response_frame_t;
 
 typedef struct __attribute__((packed)) {
-    int32_t year_month_day;       // Date in YYYYMMDD format (e.g., 20241225)
-    int32_t hour_minute_second;   // Time in HHMMSS format, timezone +8 (e.g., 143000 for 14:30:00)
+    int32_t year_month_day;       // UTC date, YYYYMMDD (ADR-023)
+    int32_t hour_minute_second;   // UTC time, HHMMSS, hour 0..23 (plain UTC, not DJI's +8; ADR-023)
     int32_t gps_longitude;        // Longitude in degrees * 1e7 (e.g., -122.4194° = -1224194000)
     int32_t gps_latitude;         // Latitude in degrees * 1e7 (e.g., 37.7749° = 377749000)
     int32_t height;               // Height in millimeters (e.g., 100m = 100000)

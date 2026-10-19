@@ -21,6 +21,11 @@ camera with a problem no longer affects the others or the remote.
 - **Fault diagnostics** — The remote records connection faults and restarts
   in its own flash area, also without a computer attached. Read them over
   USB after a tour with `tools/diag/dji_diag` (see `tools/diag/README.md`).
+- **Real GPS date and time for the cameras** — The GPS data sent to the
+  cameras now carries the UTC date and time from the GPS module. Before, the
+  remote sent the time of its own clock, which was never set (1970). Note:
+  the cameras store this GPS time one hour earlier than UTC in the clip
+  metadata; the time in DJI Mimo comes from the camera clock and is correct.
 
 ### Update Notes
 

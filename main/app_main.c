@@ -21,7 +21,6 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "driver/gpio.h"
-#include <time.h>
 #include <math.h>
 
 #include "connect_logic.h"
@@ -61,7 +60,12 @@
 #include "status_logic.h"
 #include "freertos/task.h"
 #include "dji_protocol_data_structures.h"
+#include "dji_gps_timestamp.h"
 #include "../log_config.h"
+
+/* Maximum age of GPS position and UTC time for a GPS push; position and
+ * timestamp share the same limit (ADR-023) */
+#define GPS_PUSH_MAX_DATA_AGE_MS 5000
 
 /* Forward declaration for GPS transmission task */
 static void gps_transmission_task(void *pvParameters);
@@ -428,6 +432,9 @@ static void gps_transmission_task(void *pvParameters) {
     static uint32_t last_gps_send_time = 0;
     static bool last_was_connected = false;
     static bool last_had_fix = false;
+    /* Separate from last_log_time so the UTC skip warning cannot shift the
+     * timing of the fix/no-fix logs */
+    static uint32_t last_utc_warn_time = 0;
     
     /* GPS push throttling: minimum interval between sends (100ms = 10Hz max) */
     const uint32_t GPS_SEND_INTERVAL_MS = 100;
@@ -484,7 +491,7 @@ static void gps_transmission_task(void *pvParameters) {
         
         /* Check GPS data age - don't send stale data */
         uint32_t gps_age_ms = gps_get_last_update_age_ms();
-        if (gps_age_ms > 5000) {
+        if (gps_age_ms > GPS_PUSH_MAX_DATA_AGE_MS) {
             if (current_time - last_log_time > 10000) {
                 ESP_LOGW(TAG_TASK, "Not sending GPS: Data too old (%lu ms)", gps_age_ms);
                 last_log_time = current_time;
@@ -519,33 +526,21 @@ static void gps_transmission_task(void *pvParameters) {
             last_log_time = current_time;
         }
 
-        /* Get current system time */
-        time_t now;
-        struct tm timeinfo;
-        time(&now);
-        localtime_r(&now, &timeinfo);
-        
-        /* Apply timezone +8 offset (DJI reference uses timezone +8) */
-        int original_hour = timeinfo.tm_hour;
-        timeinfo.tm_hour = (timeinfo.tm_hour + 8) % 24;
-        
-        /* Handle day rollover if hour wrapped around */
-        if (original_hour + 8 >= 24) {
-            timeinfo.tm_mday++;
-            /* Normalize date (handle month/year rollover) */
-            time_t adjusted_time = mktime(&timeinfo);
-            localtime_r(&adjusted_time, &timeinfo);
+        /* Timestamp from GPS UTC (never the system clock, which is not set).
+         * Without a fresh RMC time the frame is skipped rather than sent with
+         * a made-up time; last_gps_send_time stays untouched so the next
+         * cycle retries (ADR-023). */
+        uint32_t utc_epoch;
+        if (!gps_get_utc_epoch(&utc_epoch, GPS_PUSH_MAX_DATA_AGE_MS)) {
+            if (current_time - last_utc_warn_time > 10000) {
+                ESP_LOGW(TAG_TASK, "Not sending GPS: fix reported but no valid UTC time (RMC missing or stale)");
+                last_utc_warn_time = current_time;
+            }
+            continue;
         }
-        
-        /* Format date as YYYYMMDD */
-        int32_t year_month_day = (timeinfo.tm_year + 1900) * 10000 + 
-                                 (timeinfo.tm_mon + 1) * 100 + 
-                                 timeinfo.tm_mday;
-        
-        /* Format time as HHMMSS */
-        int32_t hour_minute_second = timeinfo.tm_hour * 10000 + 
-                                     timeinfo.tm_min * 100 + 
-                                     timeinfo.tm_sec;
+        int32_t year_month_day;
+        int32_t hour_minute_second;
+        dji_gps_encode_timestamp(utc_epoch, &year_month_day, &hour_minute_second);
 
         /* Convert coordinates to degrees * 1e7 */
         int32_t gps_latitude = (int32_t)(gps_data.latitude * 1e7f);
@@ -602,10 +597,11 @@ static void gps_transmission_task(void *pvParameters) {
         /* Log GPS data being sent periodically */
         static uint32_t last_tx_log = 0;
         if (current_time - last_tx_log > 5000) {
-            ESP_LOGI(TAG_TASK, "Sending GPS to %d camera(s) (0x00/0x17): Lat=%.6f, Lon=%.6f, Alt=%.1fm, Sats=%d, HAcc=%.1fm, VAcc=%.1fm",
+            ESP_LOGI(TAG_TASK, "Sending GPS to %d camera(s) (0x00/0x17): Lat=%.6f, Lon=%.6f, Alt=%.1fm, Sats=%d, HAcc=%.1fm, VAcc=%.1fm, ts=%ld/%06ld",
                      cameras_receiving_gps,
                      gps_data.latitude, gps_data.longitude, gps_data.altitude,
-                     gps_data.satellite_count, horizontal_acc, vertical_acc);
+                     gps_data.satellite_count, horizontal_acc, vertical_acc,
+                     (long)year_month_day, (long)hour_minute_second);
             last_tx_log = current_time;
         }
         

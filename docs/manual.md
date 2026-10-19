@@ -215,10 +215,19 @@ For each connected *and awake* camera, the remote sends:
 - Longitude  
 - Altitude  
 - Speed  
-- Timestamp  
+- Date and time (GPS UTC time; the remote has no clock or time-zone setting of its own)  
 - Fix state  
 
-Transmission is continuous (≈10 Hz).
+Transmission is continuous (≈10 Hz). GPS data is only sent while the GPS
+module reports a fix **and** a current date and time; without them, the
+cameras get no GPS data rather than a wrong time.
+
+> **Note on the recorded GPS time:** The cameras store the GPS time in the
+> clip metadata (`GPSDateTime`, e.g. visible with `exiftool -ee`) **one hour
+> earlier** than UTC. This is how the camera firmware handles the received
+> time (tested on Osmo Action 5 Pro, Osmo Action 6 and Osmo 360). The date
+> and time shown in DJI Mimo (file name, dashboard) come from the camera's
+> own clock and are not affected.
 
 If a camera sleeps, GPS transmission pauses automatically and resumes when it wakes.
 
