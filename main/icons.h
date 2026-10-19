@@ -1,6 +1,6 @@
 /*
  * icons.h
- * 24x24 bitmap icon data for DJI Camera Remote UI
+ * 1-bit bitmap icon data for DJI Camera Remote UI (24x24 unless noted)
  */
 
 #ifndef ICONS_H
@@ -40,6 +40,8 @@ extern const uint8_t next_icon[72];
 extern const uint8_t options_icon[72];
 extern const uint8_t switch_icon[72];
 extern const uint8_t alert_icon[72];
+extern const uint8_t busy_32_icon[128];   /* 32x32 */
+extern const uint8_t busy_24_icon[72];
 
 // Icon color definitions (RBG565 - swapped green/blue for this display)
 #define ICON_BLUE    0x07E0   // Blue for Connect (was green in RGB)

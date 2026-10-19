@@ -9,6 +9,7 @@
 #include "ui.h"
 #include "ui_layout.h"
 #include "lvgl_icons.h"
+#include "slot_busy.h"
 #include "connect_logic.h"
 #include "command_logic.h"
 #include "enums_logic.h"
@@ -35,6 +36,7 @@ typedef struct {
     lv_obj_t *sd_text;
     lv_obj_t *bat_icon;
     lv_obj_t *bat_text;
+    lv_obj_t *busy_icon;    /* NULL where the layout has no busy indicator */
 } cam_block_t;
 
 typedef struct {
@@ -55,6 +57,11 @@ static lv_timer_t  *s_notif_timer = NULL;
 static lv_obj_t    *s_gps_icon     = NULL;
 static lv_obj_t    *s_gps_text     = NULL;
 static btn_widget_t s_btn[3];
+/* Syncs the busy indicators with slot_busy while the main task is blocked
+ * (research §4.1); NULL where the layout has no busy indicator */
+static lv_timer_t  *s_busy_timer   = NULL;
+
+#define BUSY_TIMER_PERIOD_MS 100
 
 /* ======================================================================
  * Icon / Colour Selection Helpers
@@ -253,6 +260,37 @@ static void create_camera_block(int idx) {
     lv_obj_set_style_text_color(cb->bat_text, ui_clr_white(), 0);
     lv_obj_set_style_text_font(cb->bat_text, L->font_body, 0);
     lv_label_set_text(cb->bat_text, "");
+
+    /* Busy indicator (plan 0017): created last so it is drawn on top of the
+     * timer, SD and battery rows; A1 image, so the background stays
+     * transparent */
+    if (L->busy.enabled) {
+        cb->busy_icon = lv_image_create(cb->block);
+        lv_obj_set_pos(cb->busy_icon, L->busy.main_x, L->busy.main_y);
+        lv_image_set_src(cb->busy_icon,
+                         L->busy.main_size >= 32 ? &lvgl_busy_icon_32 : &lvgl_busy_icon_24);
+        ui_style_img_recolor(cb->busy_icon, ui_clr_cyan());
+        lv_obj_clear_flag(cb->busy_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(cb->busy_icon, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        cb->busy_icon = NULL;
+    }
+}
+
+/* Show or hide the busy indicators from the per-slot busy state. Setting
+ * the hidden flag to its current value is a cheap no-op. */
+static void sync_busy_icons(void) {
+    for (int i = 0; i < NUM_CAMERAS; i++) {
+        if (s_cam[i].busy_icon != NULL) {
+            ui_set_visible(s_cam[i].busy_icon, slot_busy_is_active(i));
+        }
+    }
+}
+
+/* LVGL task context: no extra lock needed */
+static void busy_timer_cb(lv_timer_t *t) {
+    (void)t;
+    sync_busy_icons();
 }
 
 /* ======================================================================
@@ -641,6 +679,10 @@ lv_obj_t *ui_screen_main_create(void) {
     create_status_bar();
     create_button_bar();
 
+    if (L->busy.enabled) {
+        s_busy_timer = lv_timer_create(busy_timer_cb, BUSY_TIMER_PERIOD_MS, NULL);
+    }
+
     ESP_LOGI(TAG, "Main screen created (LVGL, %ld-col)",
              (long)ui_layout_get()->cam.count);
     return s_screen;
@@ -662,12 +704,17 @@ void ui_screen_main_update(void) {
     for (int i = 0; i < NUM_CAMERAS; i++) {
         update_camera_block(i);
     }
+    sync_busy_icons();
     update_gps();
     update_buttons();
 }
 
 void ui_screen_main_destroy(void) {
     ui_screen_main_cancel_notification_timer();
+    if (s_busy_timer != NULL) {
+        lv_timer_delete(s_busy_timer);
+        s_busy_timer = NULL;
+    }
     if (s_screen != NULL) {
         lv_obj_delete(s_screen);
         s_screen = NULL;

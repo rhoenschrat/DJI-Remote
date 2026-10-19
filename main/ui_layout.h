@@ -112,6 +112,16 @@ typedef struct {
         int32_t label_ofs_y;
     } mode;
 
+    /* Per-slot busy indicator (plan 0017). enabled == false: no widgets and
+     * no visibility timer are created (presets with a notification line). */
+    struct {
+        bool    enabled;
+        int32_t main_x, main_y;   /* relative to the camera block */
+        int32_t main_size;        /* 32: lvgl_busy_icon_32 */
+        int32_t menu_x, menu_y;   /* absolute, Settings screen */
+        int32_t menu_size;        /* 24: lvgl_busy_icon_24 */
+    } busy;
+
 } ui_layout_t;
 
 /* Initialize layout from display resolution. Call once after lvgl_init(). */

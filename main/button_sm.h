@@ -15,7 +15,7 @@
 
 /* Hold time that turns a press into a long press. Initial value; the final
  * value is to be confirmed with a test ride wearing motorcycle gloves. */
-#define BUTTON_LONG_PRESS_MS       1500
+#define BUTTON_LONG_PRESS_MS       1000
 /* Inputs are ignored for this long after every release. 0 = no lockout:
  * the debounced release (BUTTON_DEBOUNCE_SAMPLES) already rejects contact
  * bounce, and a 200 ms lockout made quick repeated presses (e.g. Next)

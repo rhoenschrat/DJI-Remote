@@ -31,6 +31,7 @@
 
 #include "ui.h"
 #include "button_input.h"
+#include "slot_busy.h"
 #include "ui_layout.h"
 #include "ui_screen_splash.h"
 #include "lvgl_icons.h"
@@ -242,6 +243,13 @@ void app_main(void) {
          * Clears flags if camera didn't wake up within timeout period
          */
         ui_process_single_camera_wake_timeout();
+
+        /*
+         * BUSY INDICATOR STATE (plan 0017)
+         * End finished per-slot busy entries even where no screen shows
+         * them (M5Stack, other screens), so they never linger
+         */
+        slot_busy_evaluate_all();
 
         /*
          * DISPLAY UPDATE

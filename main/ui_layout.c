@@ -117,6 +117,11 @@ static void init_layout_320x240(ui_layout_t *L) {
     /* Mode switch */
     L->mode.icon_ofs_y  = 29;
     L->mode.label_ofs_y = 68;
+
+    /* Busy indicator — not shown; the notification line gives feedback */
+    L->busy.enabled   = false;
+    L->busy.main_x    = 0;  L->busy.main_y = 0;  L->busy.main_size = 0;
+    L->busy.menu_x    = 0;  L->busy.menu_y = 0;  L->busy.menu_size = 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -218,6 +223,11 @@ static void init_layout_240x135(ui_layout_t *L) {
     /* Mode switch */
     L->mode.icon_ofs_y  = 20;
     L->mode.label_ofs_y = 48;
+
+    /* Busy indicator — not shown; the notification line gives feedback */
+    L->busy.enabled   = false;
+    L->busy.main_x    = 0;  L->busy.main_y = 0;  L->busy.main_size = 0;
+    L->busy.menu_x    = 0;  L->busy.menu_y = 0;  L->busy.menu_size = 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -322,6 +332,15 @@ static void init_layout_320x170(ui_layout_t *L) {
      * area above the button row */
     L->mode.icon_ofs_y  = 28;
     L->mode.label_ofs_y = 73;
+
+    /* Busy indicator (plan 0017) — no notification line on this preset.
+     * Main: 32x32, centred in the 100 px block ((100 - 32) / 2 = 34) and in
+     * its lower half (y 67..133), below title, status icon and timer; it
+     * covers the middle of the SD and battery rows. Settings: 24x24 in the
+     * empty bottom-left slot that holds the GPS icon on the main screen. */
+    L->busy.enabled   = true;
+    L->busy.main_x    = 34;  L->busy.main_y = 84;   L->busy.main_size = 32;
+    L->busy.menu_x    = 5;   L->busy.menu_y = 145;  L->busy.menu_size = 24;
 }
 
 /* ---------------------------------------------------------------------- */

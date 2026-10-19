@@ -32,11 +32,15 @@ camera with a problem no longer affects the others or the remote.
   (G26/G21/G22) now behave exactly like the built-in buttons, without the
   previous 1 s cooldown.
 - **Long press: record on one camera** — On the main screen, holding Button
-  A, B or C for 1.5 s starts or stops recording on camera 1, 2 or 3 (or
+  A, B or C for 1 s starts or stops recording on camera 1, 2 or 3 (or
   wakes it for a snapshot) without changing the selection. Ideal for
   controlling a single camera while All Cameras is selected. Because of
   this, short presses on the main screen now react when the button is
   released.
+- **Busy indicator (Waveshare)** — A cyan icon on the camera's block (and in
+  its Options menu) shows that an action is running: connect, start/stop
+  recording, photo, sleep, wake, snapshot, disconnect, unpair. It disappears
+  when the camera shows the result, on an error, or after 10 s at the latest.
 
 ### Update Notes
 

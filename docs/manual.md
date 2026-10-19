@@ -33,7 +33,7 @@ the screen and is shown in the bottom row of the display.
 
 ### Long Press on the Main Screen: Record on One Camera
 
-Hold a button for **1.5 seconds** to control one camera directly, without
+Hold a button for **1 second** to control one camera directly, without
 changing the camera selection:
 
 | Hold | Camera |
@@ -42,7 +42,7 @@ changing the camera selection:
 | **Button B** | Camera 2 (middle) |
 | **Button C** | Camera 3 (right) |
 
-The action happens as soon as 1.5 s are reached; releasing the button
+The action happens as soon as 1 s is reached; releasing the button
 afterwards does nothing more. It works like Button A with that camera
 selected:
 
@@ -55,6 +55,42 @@ camera is not connected (empty slot, disconnected, connecting or not
 responding), the long press is ignored. It does not pair or reconnect a
 camera, and it does nothing while the remote is still searching for cameras
 after startup.
+
+### Busy Indicator (Waveshare)
+
+On the Waveshare ESP32-S3-LCD-1.9 there is no message line. Instead, a
+**cyan circle with two arrows** shows that the remote has reacted and an
+action on a camera is still running:
+
+- On the **Main Screen** it appears in the lower half of that camera's
+  block (over the SD card and battery rows). The camera name, status icon
+  and recording time stay visible.
+- In the **Options menu** it appears in the bottom-left corner for the
+  camera the menu belongs to.
+
+It appears as soon as you trigger the action. For a long press, that is
+when 1 s is reached, while you are still holding the button. It is shown
+for:
+
+| Action | Disappears when |
+|--------|-----------------|
+| Connect (button, at startup, after pairing) | the camera is connected |
+| Start recording / take a photo | the camera records / the photo is taken |
+| Stop recording | the camera has stopped |
+| Sleep | the camera sleeps |
+| Wake up, snapshot on a sleeping camera | the camera is awake |
+| Disconnect | the camera is disconnected |
+| Unpair | the camera is unpaired |
+
+It also disappears if the action fails, the camera disconnects or stops
+responding, and after **10 seconds** at the latest. In **All Cameras** mode
+every affected camera shows its own indicator, and each one disappears on
+its own. Highlight tags and Quick Switch show no indicator. An action
+started in the Options menu stays visible after you go back to the Main
+Screen.
+
+The M5Stack shows messages in its message line instead and has no busy
+indicator.
 
 
 # 1. Starting the Remote
@@ -134,7 +170,7 @@ Press **Button A**:
 - If recording → **Stop recording**
 
 To control **another** camera without changing the selection, hold its
-button for 1.5 s (A = Camera 1, B = Camera 2, C = Camera 3; see
+button for 1 s (A = Camera 1, B = Camera 2, C = Camera 3; see
 "Long Press on the Main Screen").
 
 
@@ -195,7 +231,7 @@ Press **Button A**:
 Sleeping cameras are awakened automatically and sequentially when needed.
 
 To start or stop **one** camera while **All Cameras** stays selected, hold its
-button for 1.5 s: **A** = Camera 1, **B** = Camera 2, **C** = Camera 3. The
+button for 1 s: **A** = Camera 1, **B** = Camera 2, **C** = Camera 3. The
 other cameras are not affected.
 
 
