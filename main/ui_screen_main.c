@@ -683,6 +683,12 @@ lv_obj_t *ui_screen_main_create(void) {
         s_busy_timer = lv_timer_create(busy_timer_cb, BUSY_TIMER_PERIOD_MS, NULL);
     }
 
+    /* Initial dynamic update before the caller loads the screen. Without it
+     * the LVGL task renders the placeholder widget state first and the next
+     * main-loop ui_update_display() repaints it with real data, which shows
+     * as a visible flicker when returning from another screen. */
+    ui_screen_main_update();
+
     ESP_LOGI(TAG, "Main screen created (LVGL, %ld-col)",
              (long)ui_layout_get()->cam.count);
     return s_screen;
