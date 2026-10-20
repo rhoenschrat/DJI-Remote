@@ -10,6 +10,7 @@
 #include "ui_layout.h"
 #include "lvgl_icons.h"
 #include "slot_busy.h"
+#include "slot_cycle.h"
 #include "connect_logic.h"
 #include "command_logic.h"
 #include "enums_logic.h"
@@ -418,13 +419,7 @@ static void update_camera_block(int idx) {
     uint8_t cam_mode = st->camera_mode;
 
     /* Selection indicator */
-    bool selected;
-    switch (g_camera_selection) {
-        case CAMERA_SELECT_0: selected = (idx == 0); break;
-        case CAMERA_SELECT_1: selected = (idx == 1); break;
-        case CAMERA_SELECT_2: selected = (idx == 2); break;
-        default:              selected = true;        break;
-    }
+    bool selected = slot_cycle_selected_has(idx);
     lv_obj_set_style_bg_color(cb->indicator, selected ? ui_clr_red() : ui_clr_black(), 0);
 
     /* Status icon (always visible) */
@@ -543,11 +538,14 @@ static void update_button_a(void) {
     const lv_image_dsc_t *icon = NULL;
     const char *label = "";
 
-    if (g_camera_selection == CAMERA_SELECT_ALL) {
+    int single = slot_cycle_selected_single();
+    if (single < 0) {
+        /* Multi-slot entry: aggregate over the entry's slots only */
         bool any_recording = false;
         bool any_connected_sleeping = false;
         bool any_awake = false;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) continue;
             if (command_logic_slot_is_paired(i) &&
                 command_logic_slot_is_connected(i)) {
                 if (command_logic_slot_is_awake(i)) {
@@ -568,7 +566,7 @@ static void update_button_a(void) {
             icon = &lvgl_record_icon; label = "Record";
         }
     } else {
-        int slot = (int)g_camera_selection;
+        int slot = single;
         if (!command_logic_slot_is_paired(slot)) {
             icon = &lvgl_pair_icon; label = "Pair";
         } else if (!command_logic_slot_is_connected(slot)) {
@@ -587,18 +585,25 @@ static void update_button_a(void) {
 }
 
 static void update_button_b(void) {
-    set_button(1, &lvgl_next_icon, ui_clr_white(), "Next");
+    if (ui_main_slots_shortcut_active()) {
+        set_button(1, &lvgl_slots_icon, ui_clr_white(), "Slots");
+    } else {
+        set_button(1, &lvgl_next_icon, ui_clr_white(), "Next");
+    }
 }
 
 static void update_button_c(void) {
     const lv_image_dsc_t *icon = NULL;
     const char *label = "";
 
-    if (g_camera_selection == CAMERA_SELECT_ALL) {
+    int single = slot_cycle_selected_single();
+    if (single < 0) {
+        /* Multi-slot entry: aggregate over the entry's slots only */
         bool any_highlight = false;
         bool any_sleep = false;
         bool any_wake  = false;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) continue;
             if (command_logic_slot_is_paired(i) &&
                 command_logic_slot_is_connected(i) &&
                 command_logic_slot_is_awake(i)) {
@@ -618,7 +623,7 @@ static void update_button_c(void) {
         else if (any_wake)      { icon = &lvgl_wakeup_icon;    label = "Wakeup"; }
         else                    { hide_button(2); return; }
     } else {
-        int slot = (int)g_camera_selection;
+        int slot = single;
         if (command_logic_slot_is_paired(slot) &&
             command_logic_slot_is_connected(slot) &&
             command_logic_slot_is_awake(slot) &&
@@ -635,7 +640,7 @@ static void update_button_c(void) {
 static void update_buttons(void) {
     if (connect_logic_is_boot_scan_active()) {
         hide_button(0);
-        hide_button(1);
+        update_button_b();      /* "Slots" during the boot scan (ADR-026) */
         set_button(2, &lvgl_scanning_icon, ui_clr_white(), "Stop");
         return;
     }
@@ -701,8 +706,7 @@ void ui_screen_main_update(void) {
 
     /* On small screens, show only the selected camera block */
     if (L->cam.count < NUM_CAMERAS) {
-        int visible_idx = (g_camera_selection < CAMERA_SELECT_ALL)
-                            ? (int)g_camera_selection : 0;
+        int visible_idx = slot_cycle_selected_first();
         for (int i = 0; i < NUM_CAMERAS; i++)
             ui_set_visible(s_cam[i].block, (i == visible_idx));
     }

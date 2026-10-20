@@ -20,7 +20,7 @@
 #include <assert.h>
 #include <string.h>
 
-#define ICON_COUNT_24  32                       /* 24x24 icons in the table */
+#define ICON_COUNT_24  34                       /* 24x24 icons in the table */
 #define ICON_COUNT_32  1                        /* 32x32 icons in the table */
 #define ICON_COUNT     (ICON_COUNT_24 + ICON_COUNT_32)
 #define ICON_BYTES(sz) (((sz) / 8) * (sz))      /* 24 -> 72, 32 -> 128 */
@@ -65,6 +65,8 @@ lv_image_dsc_t lvgl_switch_icon;
 lv_image_dsc_t lvgl_alert_icon;
 lv_image_dsc_t lvgl_busy_icon_32;
 lv_image_dsc_t lvgl_busy_icon_24;
+lv_image_dsc_t lvgl_slots_icon;
+lv_image_dsc_t lvgl_check_icon;
 
 /* ----- Helpers --------------------------------------------------------- */
 
@@ -128,6 +130,8 @@ void lvgl_icons_init(void)
         { &lvgl_switch_icon,       switch_icon,       24 },
         { &lvgl_alert_icon,        alert_icon,        24 },
         { &lvgl_busy_icon_24,      busy_24_icon,      24 },
+        { &lvgl_slots_icon,        slots_icon,        24 },
+        { &lvgl_check_icon,        check_icon,        24 },
         { &lvgl_busy_icon_32,      busy_32_icon,      32 },
     };
 

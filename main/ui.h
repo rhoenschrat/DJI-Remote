@@ -6,7 +6,7 @@
  *
  * Main features:
  * - Multi-camera state management (up to 3 cameras)
- * - Screen-based navigation (Main, Pairing, Settings, Mode Switch)
+ * - Screen-based navigation (Main, Pairing, Settings, Mode Switch, Slots)
  * - Wake-and-record state machine
  * - Wake queue for serialized camera wake-up in "All Cameras" mode
  */
@@ -23,6 +23,7 @@
 #include "ui_screen_pairing.h"
 #include "ui_screen_settings.h"
 #include "ui_screen_mode_switch.h"
+#include "ui_screen_slots.h"
 
 // UI Screen definitions
 typedef enum {
@@ -30,21 +31,17 @@ typedef enum {
     SCREEN_PAIRING,             // Pairing screen for adding new cameras
     SCREEN_CAMERA_SETTINGS,     // Per-camera settings screen
     SCREEN_MODE_SWITCH,         // Mode Switch screen for changing camera modes
+    SCREEN_SLOTS_CYCLE,         // Slots configuration: cycle entries (plan 0018)
+    SCREEN_SLOTS_ENTRY,         // Slots configuration: slots of one entry
     SCREEN_COUNT                // Total number of screens
 } ui_screen_t;
 
 // Multi-camera support constants
 #define NUM_CAMERAS 3
 
-// Camera selection for multi-camera control
-typedef enum {
-    CAMERA_SELECT_0 = 0,  // Camera 0 selected
-    CAMERA_SELECT_1,      // Camera 1 selected
-    CAMERA_SELECT_2,      // Camera 2 selected
-    CAMERA_SELECT_ALL     // All cameras selected
-} camera_selection_t;
-
-extern camera_selection_t g_camera_selection;
+// Main Screen selection: configurable slot cycle (slot_cycle.h, ADR-026).
+// Single-slot entry = single-camera mode, multi-slot entry = "All Cameras"
+// semantics restricted to the entry's slots.
 
 // Wake-up queue state machine for serialized wake broadcasts in "All Cameras" mode
 typedef enum {
@@ -159,6 +156,11 @@ void ui_initiate_boot_scan_connections(void);
 void ui_update_display(void);
 void ui_execute_main_screen_action(void);
 void ui_cycle_camera_selection(void);
+
+/* Main screen Button B opens the Slots configuration (boot scan only,
+ * ADR-026) */
+bool ui_main_slots_shortcut_active(void);
+
 void ui_show_message(const char* message, uint16_t color, int duration_ms);
 void ui_show_shutter_bottom_message(const char* message, uint16_t color, int duration_ms);
 void ui_post_shutter_message(const char *message, uint16_t color, uint32_t duration_ms);

@@ -50,5 +50,7 @@ extern lv_image_dsc_t lvgl_switch_icon;
 extern lv_image_dsc_t lvgl_alert_icon;
 extern lv_image_dsc_t lvgl_busy_icon_32;   /* 32x32, main screen (plan 0017) */
 extern lv_image_dsc_t lvgl_busy_icon_24;   /* 24x24, Settings screen */
+extern lv_image_dsc_t lvgl_slots_icon;     /* Options Menu "Slots" (plan 0018) */
+extern lv_image_dsc_t lvgl_check_icon;     /* Slots entry screen check mark */
 
 #endif

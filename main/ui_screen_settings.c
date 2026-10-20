@@ -2,7 +2,7 @@
  * Camera Settings Screen module (LVGL).
  *
  * Displays a submenu with per-camera actions (Mode Switch, Sleep/Wake,
- * Connect/Disconnect, Pair/Unpair). Button A selects, Button B moves to the
+ * Connect/Disconnect, Pair/Unpair) and the global Slots configuration. Button A selects, Button B moves to the
  * next entry, Button C returns to the main screen (handled in ui.c).
  * Layout positions come from ui_layout_get() for multi-resolution support.
  */
@@ -189,6 +189,13 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     /* Static entry: Mode Switch */
     lv_image_set_src(s_entries[SETTINGS_ITEM_MODE_SWITCH].icon, &lvgl_switch_icon);
     lv_label_set_text(s_entries[SETTINGS_ITEM_MODE_SWITCH].label, "Mode Switch");
+
+    /* Static entry: Slots (global configuration, independent of this slot).
+     * Not shown where the preset has fewer entries (240x135). */
+    if (s_entry_count > SETTINGS_ITEM_SLOTS) {
+        lv_image_set_src(s_entries[SETTINGS_ITEM_SLOTS].icon, &lvgl_slots_icon);
+        lv_label_set_text(s_entries[SETTINGS_ITEM_SLOTS].label, "Slots");
+    }
 
     /* Notification area — omitted on 320x170 (no space) */
     if (L->submenu.notif_w > 0) {

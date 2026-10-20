@@ -48,12 +48,16 @@
 #include "ui_layout.h"
 #include "button_input.h"
 #include "slot_busy.h"
+#include "slot_cycle.h"
 
 /* Logging tag for ESP_LOG functions */
 #define TAG "UI"
 
 /* Multi-camera support constant */
 #define NUM_CAMERAS 3
+
+_Static_assert(SLOT_CYCLE_NUM_SLOTS == NUM_CAMERAS,
+               "slot cycle masks must cover every camera slot");
 
 /* NVS (Non-Volatile Storage) configuration for persistent data */
 #define NVS_CAMERA_NAMESPACE "camera"      /* Namespace for camera pairing data */
@@ -106,16 +110,14 @@ ui_state_t g_ui_state = {
     .display_needs_update = true,        /* Force initial display update */
 };
 
-/* camera_selection_t is defined in ui.h */
-
 /* Main screen state tracking */
 static bool g_main_screen_initialized = false;
+
+static bool wake_queue_contains(int slot);
 
 /* GPS display state tracking (for independent updates) */
 static bool g_last_displayed_gps_fix = false;  // Last displayed GPS fix state
 static char g_last_displayed_gps_text[24] = "";  // Last displayed GPS coordinates text
-camera_selection_t g_camera_selection = CAMERA_SELECT_0;
-static camera_selection_t g_prev_camera_selection = CAMERA_SELECT_0;
 
 /* Pairing screen state */
 #define MAX_DISCOVERED_CAMERAS 10
@@ -137,6 +139,9 @@ static int g_settings_active_camera_index = 0;
 
 /* Mode Switch Screen state (slot index used by ui_switch_screen) */
 static int g_mode_switch_camera_index = 0;
+
+/* Slots configuration: cycle entry edited by / returned to (plan 0018) */
+static int g_slots_entry_pos = 0;
 
 /* Slot whose Button A "Connect" hit an unresponsive link (ADR-019); handled
  * after the LVGL lock is released: teardown, wait for release, reconnect */
@@ -972,6 +977,11 @@ void ui_init(void) {
 
     /* Configure display scaling and layout for detected hardware */
     ui_detect_device_and_set_scale();
+
+    /* Slot cycle before the first main screen draw: the selection indicator
+     * and button labels depend on it. NVS is up since ui_early_init(). */
+    slot_cycle_init();
+
     g_ui_state.current_screen = SCREEN_MAIN;
     g_ui_state.display_needs_update = true;
 
@@ -1033,34 +1043,33 @@ const char* ui_get_camera_model_name(uint32_t device_id) {
 /* Old draw functions removed in Phase 6 -- see ui_screen_main.c, ui_screen_pairing.c,
  * ui_screen_settings.c, ui_screen_mode_switch.c for LVGL replacements. */
 
+
 /**
- * @brief Cycle camera selection to next state
- * 
- * Called when Button B is pressed. Cycles through Camera 0 → 1 → 2 → All → 0.
- * Updates only the selection frame borders, not camera content.
+ * @brief Whether Button B on the main screen opens the Slots configuration
+ *
+ * ADR-026: the cycle may consist of multi-slot entries only, which makes the
+ * Options Menu (and its "Slots" entry) unreachable. The configuration stays
+ * reachable through Button B "Slots" during the boot scan, which runs at
+ * every boot with at least one paired camera.
+ */
+bool ui_main_slots_shortcut_active(void) {
+    return connect_logic_is_boot_scan_active();
+}
+/**
+ * @brief Advance the Main Screen selection to the next cycle entry
+ *
+ * Called when Button B is pressed. Follows the configurable slot cycle
+ * (default 1 -> 2 -> 3 -> 1+2+3), skipping Empty entries (ADR-026).
  */
 void ui_cycle_camera_selection(void) {
-    // Save previous selection
-    g_prev_camera_selection = g_camera_selection;
-    
-    // Cycle to next selection
-    switch (g_camera_selection) {
-        case CAMERA_SELECT_0:
-            g_camera_selection = CAMERA_SELECT_1;
-            break;
-        case CAMERA_SELECT_1:
-            g_camera_selection = CAMERA_SELECT_2;
-            break;
-        case CAMERA_SELECT_2:
-            g_camera_selection = CAMERA_SELECT_ALL;
-            break;
-        case CAMERA_SELECT_ALL:
-            g_camera_selection = CAMERA_SELECT_0;
-            break;
-    }
-    
-    ESP_LOGI(TAG, "Camera selection changed: %d -> %d", g_prev_camera_selection, g_camera_selection);
-    
+    int prev_pos = slot_cycle_get_position();
+    int pos = slot_cycle_next();
+
+    char name[SLOT_CYCLE_NAME_LEN];
+    slot_cycle_format_name(slot_cycle_get_entry(pos), name, sizeof(name));
+    ESP_LOGI(TAG, "Camera selection changed: entry %d -> %d (%s)",
+             prev_pos + 1, pos + 1, name);
+
     // Trigger display update which will draw indicators with correct order
     g_ui_state.display_needs_update = true;
 }
@@ -1329,6 +1338,10 @@ void ui_switch_screen(ui_screen_t screen) {
         case SCREEN_MODE_SWITCH:
             ui_screen_mode_switch_destroy();
             break;
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_screen_slots_destroy();
+            break;
         default:
             break;
     }
@@ -1348,6 +1361,12 @@ void ui_switch_screen(ui_screen_t screen) {
             break;
         case SCREEN_MODE_SWITCH:
             scr = ui_screen_mode_switch_create(g_mode_switch_camera_index);
+            break;
+        case SCREEN_SLOTS_CYCLE:
+            scr = ui_screen_slots_create(SLOTS_MODE_CYCLE, g_slots_entry_pos);
+            break;
+        case SCREEN_SLOTS_ENTRY:
+            scr = ui_screen_slots_create(SLOTS_MODE_ENTRY, g_slots_entry_pos);
             break;
         default:
             break;
@@ -1370,6 +1389,30 @@ static void ui_handle_mode_switch_button_a(void) {
 static void ui_handle_mode_switch_button_b(void) {
     /* Button B has no function on the Mode Switch screen (Back is Button C) */
     ESP_LOGD(TAG, "Mode Switch: Button B ignored");
+}
+
+/**
+ * @brief Button A on the Slots screens (plan 0018)
+ *
+ * Cycle list: open the entry screen for the highlighted entry.
+ * Entry screen: toggle the highlighted slot; a toggle that would leave every
+ * entry Empty is rejected and flashes the row red. Nothing is saved
+ * here: the cycle is persisted on Back from the cycle list.
+ */
+static void ui_handle_slots_screen_button_a(void) {
+    if (g_ui_state.current_screen == SCREEN_SLOTS_CYCLE) {
+        g_slots_entry_pos = ui_screen_slots_get_selection();
+        ui_switch_screen(SCREEN_SLOTS_ENTRY);
+        return;
+    }
+
+    int pos = ui_screen_slots_get_entry_pos();
+    int slot = ui_screen_slots_get_selection();
+    if (slot_cycle_toggle(pos, slot)) {
+        ui_screen_slots_update();
+    } else {
+        ui_screen_slots_flash_rejected();
+    }
 }
 
 /**
@@ -1523,6 +1566,14 @@ static void ui_handle_settings_screen_button_a(void) {
             }
             break;
 
+        case SETTINGS_ITEM_SLOTS:
+            // Global configuration: available in every connection state and
+            // independent of the slot the Options Menu was opened for
+            ESP_LOGI(TAG, "Settings: Slots selected");
+            g_slots_entry_pos = slot_cycle_get_position();
+            ui_switch_screen(SCREEN_SLOTS_CYCLE);
+            break;
+
         case SETTINGS_ITEM_PAIR_UNPAIR:
             if (cam->is_paired) {
                 ESP_LOGI(TAG, "Settings: Unpairing camera %d", active_slot);
@@ -1615,6 +1666,11 @@ void ui_update_display(void) {
             ui_screen_mode_switch_update();
             break;
 
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_screen_slots_update();
+            break;
+
         case SCREEN_MAIN:
         default: {
             if (!ui_screen_main_is_created()) {
@@ -1666,6 +1722,10 @@ void ui_handle_button_a(void) {
         case SCREEN_MODE_SWITCH:
             ui_handle_mode_switch_button_a();
             break;
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_handle_slots_screen_button_a();
+            break;
         default:
             break;
     }
@@ -1699,10 +1759,11 @@ void ui_handle_button_a(void) {
 
     // Deferred reconnection: runs outside the LVGL lock so the display
     // can refresh to show "connecting" state during the blocking BLE call.
+    // Single-slot selections only; multi-slot entries never schedule one.
     if (g_ui_state.current_screen == SCREEN_MAIN &&
-        g_camera_selection != CAMERA_SELECT_ALL) {
-        int cam_idx = (int)g_camera_selection;
-        if (cam_idx >= 0 && cam_idx < NUM_CAMERAS &&
+        slot_cycle_selected_single() >= 0) {
+        int cam_idx = slot_cycle_selected_single();
+        if (cam_idx < NUM_CAMERAS &&
             g_camera_states[cam_idx].connection_state == CAM_STATE_CONNECTING &&
             !g_camera_states[cam_idx].is_connected) {
             int result = ui_perform_complete_reconnection(cam_idx, true);
@@ -1725,7 +1786,14 @@ void ui_handle_button_b(void) {
     lvgl_port_lock(0);
     switch (g_ui_state.current_screen) {
         case SCREEN_MAIN:
-            ui_cycle_camera_selection();
+            if (ui_main_slots_shortcut_active()) {
+                // Slots shortcut (ADR-026); the boot scan keeps running
+                ESP_LOGI(TAG, "Main: Slots (Button B), opening slot cycle configuration");
+                g_slots_entry_pos = slot_cycle_get_position();
+                ui_switch_screen(SCREEN_SLOTS_CYCLE);
+            } else {
+                ui_cycle_camera_selection();
+            }
             break;
         case SCREEN_PAIRING:
             ui_handle_pairing_screen_button_b();
@@ -1735,6 +1803,10 @@ void ui_handle_button_b(void) {
             break;
         case SCREEN_MODE_SWITCH:
             ui_handle_mode_switch_button_b();
+            break;
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_screen_slots_button_b();
             break;
         default:
             break;
@@ -1769,6 +1841,21 @@ void ui_handle_button_c(void) {
             ui_return_to_main_screen();
             lvgl_port_unlock();
             return;
+        case SCREEN_SLOTS_ENTRY:
+            ESP_LOGI(TAG, "Slots: Back (Button C), returning to cycle list");
+            g_slots_entry_pos = ui_screen_slots_get_entry_pos();
+            ui_switch_screen(SCREEN_SLOTS_CYCLE);
+            lvgl_port_unlock();
+            return;
+        case SCREEN_SLOTS_CYCLE:
+            ESP_LOGI(TAG, "Slots: Back (Button C), returning to Main Screen");
+            // Selection first: the main screen is drawn from it (ADR-026)
+            slot_cycle_normalize_selection();
+            ui_return_to_main_screen();
+            lvgl_port_unlock();
+            // Persist outside the LVGL lock, main task only (ADR-022)
+            slot_cycle_save_if_changed();
+            return;
         default:
             break;
     }
@@ -1787,10 +1874,10 @@ void ui_handle_button_c(void) {
     }
     
 
-    // PRECEDENCE 2: Single camera slot selected (0, 1, or 2)
-    if (g_camera_selection != CAMERA_SELECT_ALL) {
-        // Get the selected camera index
-        int cam_idx = (int)g_camera_selection;  // CAMERA_SELECT_0=0, etc.
+    // PRECEDENCE 2: Single-slot entry selected (any slot 0, 1 or 2)
+    int single_slot = slot_cycle_selected_single();
+    if (single_slot >= 0) {
+        int cam_idx = single_slot;
         
         // Check if all conditions are met for highlight tag:
         // - paired, connected, awake, recording, highlight-supported
@@ -1816,11 +1903,15 @@ void ui_handle_button_c(void) {
         return;
     }
     
-    // PRECEDENCE 3: "All Cameras" selection
-    if (g_camera_selection == CAMERA_SELECT_ALL) {
+    // PRECEDENCE 3: multi-slot entry ("All Cameras" semantics restricted to
+    // the entry's slots; other slots are never touched, ADR-026)
+    {
         // Count how many cameras meet all conditions for highlight tag
         int highlight_eligible_count = 0;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (command_logic_slot_is_paired(i) &&
                 command_logic_slot_is_connected(i) &&
                 command_logic_slot_is_awake(i) &&
@@ -1834,6 +1925,9 @@ void ui_handle_button_c(void) {
             // Highlight takes priority - one worker job per eligible slot
             int submitted = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (command_logic_slot_is_paired(i) &&
                     command_logic_slot_is_connected(i) &&
                     command_logic_slot_is_awake(i) &&
@@ -1858,6 +1952,9 @@ void ui_handle_button_c(void) {
         // Sleep candidates are: paired, connected, awake, NOT recording
         int sleep_candidates_count = 0;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (is_camera_sleep_candidate(i)) {
                 sleep_candidates_count++;
             }
@@ -1868,6 +1965,9 @@ void ui_handle_button_c(void) {
             ESP_LOGI(TAG, "Button C: Sending sleep to %d cameras in All Cameras mode", sleep_candidates_count);
             int sent_count = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (is_camera_sleep_candidate(i) &&
                     ui_submit_job_busy(i, CMD_JOB_SLEEP, false) == ESP_OK) {
                     sent_count++;
@@ -1889,6 +1989,9 @@ void ui_handle_button_c(void) {
         // No sleep candidates - check for wake candidates (sleeping cameras)
         int wake_candidates_count = 0;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (is_camera_wake_candidate(i)) {
                 wake_candidates_count++;
             }
@@ -1901,11 +2004,21 @@ void ui_handle_button_c(void) {
             // cause each subsequent broadcast to overwrite the previous one.
             ESP_LOGI(TAG, "Button C: Adding %d cameras to wake queue (wake-only mode)", wake_candidates_count);
             
-            // Clear the wake queue first in case there are stale entries
-            wake_queue_clear();
+            // Clear the wake queue first in case there are stale entries.
+            // Only when the entry covers every slot (the former "All
+            // Cameras"): for a subset, clearing would also drop or abort a
+            // queued wake of a slot outside the entry (e.g. a long press),
+            // so the queue is kept and its duplicate check applies (ADR-026).
+            bool entry_has_all_slots = (slot_cycle_selected_mask() == SLOT_CYCLE_MASK_ALL);
+            if (entry_has_all_slots) {
+                wake_queue_clear();
+            }
             
             int queued_count = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (is_camera_wake_candidate(i)) {
                     // Add to wake queue but do NOT set snapshot_pending
                     // This is wake-only mode, not snapshot mode
@@ -1913,6 +2026,10 @@ void ui_handle_button_c(void) {
                         queued_count++;
                         slot_busy_begin(i, SLOT_BUSY_WAKE);
                         ESP_LOGI(TAG, "Camera %d added to wake queue (wake-only, no snapshot)", i);
+                    } else if (!entry_has_all_slots && wake_queue_contains(i)) {
+                        // Already queued (kept queue of a subset entry)
+                        queued_count++;
+                        slot_busy_begin(i, SLOT_BUSY_WAKE);
                     } else {
                         ESP_LOGW(TAG, "Failed to add camera %d to wake queue", i);
                     }
@@ -2283,15 +2400,20 @@ void ui_screen_main(void) {
     }
 
     // Check which camera(s) are selected
-    if (g_camera_selection == CAMERA_SELECT_ALL) {
-        // "All cameras" mode - control all connected cameras
-        ESP_LOGI(TAG, "All cameras mode - controlling all connected cameras");
+    int single_slot = slot_cycle_selected_single();
+    if (single_slot < 0) {
+        // Multi-slot entry - control the connected cameras of the entry only
+        ESP_LOGI(TAG, "Multi-slot mode (mask 0x%x) - controlling connected cameras of the entry",
+                 (unsigned)slot_cycle_selected_mask());
         
         // Only CAM_STATE_CONNECTED slots take part; unresponsive slots are
         // skipped by these checks (ADR-019)
         // Determine if any connected camera is recording
         bool any_recording = false;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
                 any_recording = true;
                 break;
@@ -2308,6 +2430,9 @@ void ui_screen_main(void) {
             int cameras_stopped = 0;
             int cameras_busy = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
                     esp_err_t ret = ui_submit_job_busy(i, CMD_JOB_RECORD_STOP_ASYNC, false);
                     if (ret == ESP_OK) {
@@ -2332,6 +2457,9 @@ void ui_screen_main(void) {
             
             // First pass: Process all non-sleeping cameras immediately
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 camera_state_t *cam_state = &g_camera_states[i];
                 
                 // Only process connected cameras
@@ -2355,6 +2483,9 @@ void ui_screen_main(void) {
             
             // Second pass: Queue all sleeping cameras for serialized wake-up
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 camera_state_t *cam_state = &g_camera_states[i];
                 
                 // Only process connected cameras
@@ -2416,8 +2547,8 @@ void ui_screen_main(void) {
         return;
     }
     
-    // Single camera selected - get the camera index
-    int cam_idx = (int)g_camera_selection;  // CAMERA_SELECT_0=0, etc.
+    // Single-slot entry selected
+    int cam_idx = single_slot;
     ESP_LOGI(TAG, "Single camera mode - camera %d selected", cam_idx);
     
     // Check if this camera is paired - if not, open Pairing Screen
@@ -2529,6 +2660,19 @@ int wake_queue_get_next(void) {
 /**
  * @brief Clear entire wake-up queue
  */
+/**
+ * @brief Whether a slot is waiting in (or being processed by) the wake queue
+ */
+static bool wake_queue_contains(int slot) {
+    for (int i = 0; i < g_wake_queue.queue_count; i++) {
+        int idx = (g_wake_queue.queue_head + i) % NUM_CAMERAS;
+        if (g_wake_queue.camera_indices[idx] == slot) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void wake_queue_clear(void) {
     g_wake_queue.queue_head = 0;
     g_wake_queue.queue_tail = 0;
