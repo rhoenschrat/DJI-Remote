@@ -2090,10 +2090,12 @@ bool ui_button_has_long_press(button_id_t btn) {
  * @brief Long press on the main screen: shutter action on a fixed slot
  *
  * Button A/B/C -> slot 0/1/2, independent of the camera selection (which is
- * not changed). Behaves like a short Button A press with that slot selected,
- * but only for a connected slot: empty, disconnected, connecting and
- * unresponsive slots are ignored silently (no pairing, reconnect or recovery
- * by long press). A sleeping slot is woken through the wake queue.
+ * not changed). Behaves like a short Button A press with that slot selected:
+ * - connected: shutter action; a sleeping slot is woken through the wake
+ *   queue
+ * - paired but disconnected: Connect, same reconnect as Button A "Connect"
+ * Empty, connecting and unresponsive slots are ignored silently (no pairing
+ * and no unresponsive recovery by long press).
  */
 static void ui_handle_slot_long_press(button_id_t btn, int slot) {
     static const char btn_name[] = { 'A', 'B', 'C' };
@@ -2111,6 +2113,25 @@ static void ui_handle_slot_long_press(button_id_t btn, int slot) {
 
     lvgl_port_lock(0);
     camera_connection_state_t state = g_camera_states[slot].connection_state;
+    if (state == CAM_STATE_PAIRED_DISCONNECTED) {
+        ESP_LOGI(TAG, "Button %c long press: connecting slot %d", btn_name[btn], slot);
+        // Connecting icon and busy state first, like Button A "Connect"
+        g_camera_states[slot].connection_state = CAM_STATE_CONNECTING;
+        slot_busy_begin(slot, SLOT_BUSY_CONNECT);
+        g_ui_state.display_needs_update = true;
+        lvgl_port_unlock();
+
+        // Blocking (scan + protocol handshake) and shows its messages with
+        // delays, so it runs without the LVGL lock (ADR-024 amendment)
+        int result = ui_perform_complete_reconnection(slot, true);
+        ESP_LOGI(TAG, "Long press connect for camera %d: %s",
+                 slot, result == 0 ? "successful" : "failed");
+
+        lvgl_port_lock(0);
+        g_ui_state.display_needs_update = true;
+        lvgl_port_unlock();
+        return;
+    }
     if (state != CAM_STATE_CONNECTED) {
         lvgl_port_unlock();
         ESP_LOGD(TAG, "Button %c long press ignored: slot %d not connected (state %d)",
