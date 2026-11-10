@@ -6,6 +6,8 @@
 > widget coordinates set via `lv_obj_set_pos()` and read from the centralized
 > `ui_layout_t` struct (see `main/ui_layout.h`).
 
+> For the 320x170 Waveshare preset, see [UI-SPEC-320x170.md](UI-SPEC-320x170.md).
+
 **Display:** 320x240 TFT (ST7789), landscape, origin top-left `(0,0)`.
 
 **Rendering:** All UI elements are LVGL widgets. Positions listed below
@@ -41,7 +43,8 @@ Plus2, 1-column). The tables below document the 320x240 preset.
 | GPS Status Area | 160 | 192 | 150 | 24 |
 
 **GPS Status Area contents:**
-- Icon: `gps_icon` 24x24 at `(160, 192)`
+- Icon: `gps_icon` 24x24 at `(160, 192)` — map pin (Material Symbols
+  `location_on`, filled, full 24 px height; source `docs/ui/icons/map-pin.svg`)
 - Text: `"lat, lon"` at `(194, 196)` — 2 decimal places
 - Colors: Red icon (no fix), Yellow icon+text (valid fix)
 
@@ -66,7 +69,7 @@ Each button contains:
 
 | Mode | Condition | Visible |
 |------|-----------|---------|
-| `BUTTONS_MODE_SCAN_ONLY_C` | Boot scan active | C only: `scanning_icon` + "Stop" |
+| `BUTTONS_MODE_BOOT_SCAN` | Boot scan active | B: `slots_icon` + "Slots", C: `scanning_icon` + "Stop"; A hidden |
 | `BUTTONS_MODE_BOOT_CONNECT_HIDDEN` | Connecting after scan | None (black) |
 | `BUTTONS_MODE_NORMAL` | Standard operation | All three with dynamic mapping |
 
@@ -92,8 +95,9 @@ offsets. The same layout is used for all three slots.
 
 ### 2.2 Selection Indicator
 
-- Red fill = selected, Black fill = not selected
-- In "All Cameras" mode: all three indicators are red
+- Red fill = slot belongs to the selected cycle entry, Black fill = not
+- Multi-slot entry (e.g. "Slot 1 + 3"): every slot of the entry is red
+  (`slot_cycle_selected_has()`)
 
 ### 2.3 Title Area
 
@@ -123,14 +127,19 @@ Source depends on `camera_supports_new_status_push`:
 
 24x24 icon centered at `(base_x + 38, base_y + 77)`.
 
-Priority order (first match wins):
-1. Connected + paused → `pause_icon` (white)
-2. Connected + recording → `record_icon` (red)
-3. Connected + sleeping → `sleep_icon` (white)
-4. Not paired → `bluetooth_icon` (white)
-5. Connecting → `connecting_icon` (blue)
-6. Found in boot scan → `found_icon` (green)
-7. Paired but disconnected → `bluetooth_icon` (blue)
+Priority order (first match wins, `get_status_icon_and_color()`):
+1. Unresponsive (link up, no status push ≥ 6 s) → `alert_icon`
+   (warning triangle, yellow)
+2. Connected + sleeping → `sleep_icon` (white)
+3. Connected + recording → `record_icon` (red)
+4. Connected (paused / idle) → `pause_icon` (white)
+5. Not paired → `bluetooth_icon` (white)
+6. Connecting → `connecting_icon` (blue)
+7. Found in boot scan → `found_icon` (green)
+8. Paired but disconnected → `bluetooth_icon` (blue)
+
+An unresponsive slot hides the mode, timer, SD and battery rows like a
+disconnected slot (they are only shown for `CAM_STATE_CONNECTED`).
 
 ### 2.7 Recording Timer
 
@@ -143,7 +152,8 @@ Priority order (first match wins):
 
 - Icon: `sd_card_icon` 24x24 at `(base_x + 5, base_y + 125)`
 - Text: capacity string at `(base_x + 34, base_y + 125)`, width=61
-- Color thresholds: >16GB white, ≤16GB yellow, ≤6GB red
+- Thresholds: >16GB normal, ≤16GB warning (yellow), ≤6GB critical (red);
+  look per level: §2.10
 
 ### 2.9 Battery Status
 
@@ -151,7 +161,33 @@ Priority order (first match wins):
   - >75%→`battery_100_icon`, ≤75%→`battery_75_icon`, ≤50%→`battery_50_icon`,
     ≤25%→`battery_25_icon`, ≤10%→`battery_0_icon`
 - Text: `"NN %"` at `(base_x + 34, base_y + 149)`, width=61
-- Color thresholds: >25% white, ≤25% yellow, ≤10% red
+- Thresholds: >25% normal, ≤25% warning (yellow), ≤10% critical (red);
+  look per level: §2.10
+
+### 2.10 Row Warning Style
+
+Selected at build time by Kconfig `UI_STATUS_WARN_STYLE` (menu "UI
+Options"); each row (SD, battery) is evaluated independently.
+
+| Level | Background variant (default, `UI_STATUS_WARN_BACKGROUND`) | Tint variant (legacy, `UI_STATUS_WARN_TINT`) |
+|-------|-----------------------------------------------------------|----------------------------------------------|
+| Normal | No background; icon + text white | Icon + text white |
+| Warning | Row background yellow; icon + text **black** | Icon + text yellow |
+| Critical | Row background red; icon + text **white** | Icon + text red |
+
+Row background rectangle (block-relative, LVGL content area = inside the
+1 px block border, so x = 0 is the first inner pixel; layout `L->row_bg`):
+
+| Preset | SD row (x, y, w, h) | Battery row (x, y, w, h) |
+|--------|---------------------|--------------------------|
+| 320x240 | 0, 125, 98, 24 | 0, 149, 98, 24 (rows touch) |
+| 320x170 | 0, 80, 98, 24 | 0, 108, 98, 24 (4 px gap) |
+| 240x135 | 0, 52, 120, 24 | 120, 52, 98, 24 (one line, split at the battery icon x) |
+
+The backgrounds are created before the row's icon and text (drawn below
+them) and are hidden whenever the rows are hidden (slot not
+`CAM_STATE_CONNECTED`; sleeping slots keep their rows). The busy indicator
+(320x170) stays on top.
 
 ---
 
@@ -181,9 +217,13 @@ Entry Y positions: `base_y + 29 + (index * 29)` → 39, 68, 97, 126, 155.
 |---------|----------|-------|--------|
 | Selection Indicator | +0 | 10 | 24 |
 | Icon | +15 | 24 | 24 |
-| Label | +44 | 256 | 24 |
+| Label | +44 | 252 | 24 |
 
 Indicator: Red if selected, Black if not.
+
+Label width = `submenu.w − label_ofs_x − 4` (right margin) = `300 − 44 − 4`.
+Labels use `LV_LABEL_LONG_DOT`: text that does not fit ends with an ellipsis
+(Pairing names are additionally cut to 23 characters, which always fit).
 
 **Selection change clearing area** (prevents artifacts):
 - Position: `(entry_x - 5, entry_y - 5)`
@@ -192,9 +232,13 @@ Indicator: Red if selected, Black if not.
 
 ### 3.3 Submenu Buttons
 
-- Button A: `select_icon` + "Select"
-- Button B: `next_icon` + "Next" (icon rotated 90° CW to point downward)
-- Button C: Empty (no function)
+- Button A: `select_icon` + "Select" → executes the selected entry
+- Button B: `next_icon` + "Next" (icon rotated 90° CW to point downward) →
+  next entry, wraps after the last visible entry
+- Button C: `back_icon` + "Back" → returns to the Main Screen (Pairing: also
+  stops the scan)
+
+"Back" is **not** a list entry; entry 0 is the first real option.
 
 ### 3.4 Title Text
 
@@ -205,18 +249,22 @@ Indicator: Red if selected, Black if not.
 
 ## 4. Settings Screen Entries
 
-1. `back_icon` + "Back"
-2. `switch_icon` + "Mode Switch"
-3. Dynamic: `sleep_icon`/"Sleep" or `wakeup_icon`/"Wakeup"
-4. Dynamic: `connect_icon`/"Connect" or `disconnect_icon`/"Disconnect"
-5. Dynamic: `unpair_icon`/"Unpair Camera" or `pair_icon`/"Pair Camera"
+1. `switch_icon` + "Mode Switch"
+2. Dynamic: `sleep_icon`/"Sleep" or `wakeup_icon`/"Wakeup"
+3. Dynamic: `connect_icon`/"Connect" or `disconnect_icon`/"Disconnect"
+4. Dynamic: `unpair_icon`/"Unpair" or `pair_icon`/"Pair Camera"
+5. `slots_icon` + "Slots" (row y = 155; global slot cycle)
+
+"Slots" is shown only where the preset has ≥ 5 entries (`max_entries`);
+the 240x135 preset (3 entries) does not show it.
 
 ---
 
 ## 5. Pairing Screen Entries
 
-1. `back_icon` + "Back"
-2-5. Discovered cameras: `photo_icon` + camera name
+1–5. Discovered cameras only: `photo_icon` + camera name (up to 5 on this
+preset). Entries stay hidden until a camera is found; the notification area
+shows "Scanning..." (cyan) meanwhile.
 
 ---
 
@@ -236,25 +284,45 @@ Indicator: Red if selected, Black if not.
 ### 6.1 Mode Switch Buttons
 
 - Button A: `switch_icon` + "Switch" → sends QS button key reporting
-- Button B: `back_icon` + "Back" → returns to Main Screen
-- Button C: Empty (no function)
+- Button B: empty (no widget, no function)
+- Button C: `back_icon` + "Back" → returns to Main Screen
 
 ---
 
-## 7. Splash Screen
+## 6A. Slots Screens
 
-| Region | X | Y | Width | Height |
-|--------|---|---|-------|--------|
-| Full screen | 0 | 0 | 320 | 240 |
+Reached from the Options Menu ("Slots") or from Main Screen Button B
+"Slots" during the boot scan.
+Two screens with the submenu row geometry of §3.1/§3.2 (rows at y = 39, 68,
+97, 126), single column, **no title** (rows keep their positions; the title
+area stays empty), no notification text. Buttons as in §3.3 (A Select,
+B Next rotated, C Back).
 
-- Background: Black
-- Logo: `splash_logo` image descriptor, centered
-- Rendered by `ui_screen_splash`; destroyed when boot completes and Main Screen loads
-- HAL enables backlight after the first LVGL flush of this screen
+**Cycle list** (`SCREEN_SLOTS_CYCLE`): 4 rows = cycle entries in order.
+
+| Element | X | Width | Notes |
+|---------|---|-------|-------|
+| Selection Indicator | 10 | 10 | Red = highlighted entry |
+| Icon | 25 | 24 | `slots_icon`, white |
+| Label | 54 | 252 | Derived name: "Slot 1", "Slot 2 + 3", "Slot 1 + 2 + 3", "Empty" |
+
+**Entry screen** (`SCREEN_SLOTS_ENTRY`): 3 rows "Slot 1", "Slot 2", "Slot 3".
+
+| Element | X | Width | Notes |
+|---------|---|-------|-------|
+| Selection Indicator | 10 | 10 | Red = highlighted slot |
+| Label | 54 | 213 | Ends 4 px before the check mark |
+| Check Mark | 271 | 24 | `check_icon`, green; visible only for active slots |
+
+Check mark x = `screen_w − (base_x + icon_ofs_x) − 24` = `320 − 25 − 24`
+(mirrors the left icon inset). No left icon on the entry screen.
+
+Rejected toggle (would leave every entry Empty): the highlighted row's label
+turns red for 1 s, then white again.
 
 ---
 
-## 8. Color Reference
+## 7. Color Reference
 
 ### Default Colors
 
@@ -276,21 +344,22 @@ Indicator: Red if selected, Black if not.
 | Not paired | White (bluetooth_icon) |
 | Found in scan | Green (found_icon) |
 | Connecting | Blue (connecting_icon) |
+| Unresponsive | Yellow (alert_icon) |
 | GPS no fix | Red |
 | GPS valid fix | Yellow |
 
 ### Threshold Colors (SD Card)
 
-| Condition | Color |
-|-----------|-------|
-| >16 GB free | White |
-| ≤16 GB free | Yellow |
-| ≤6 GB free | Red |
+| Condition | Background variant (default) | Tint variant |
+|-----------|------------------------------|--------------|
+| >16 GB free | White icon + text | White |
+| ≤16 GB free | Yellow row, black icon + text | Yellow |
+| ≤6 GB free | Red row, white icon + text | Red |
 
 ### Threshold Colors (Battery)
 
-| Condition | Color |
-|-----------|-------|
-| >25% | White |
-| ≤25% | Yellow |
-| ≤10% | Red |
+| Condition | Background variant (default) | Tint variant |
+|-----------|------------------------------|--------------|
+| >25% | White icon + text | White |
+| ≤25% | Yellow row, black icon + text | Yellow |
+| ≤10% | Red row, white icon + text | Red |

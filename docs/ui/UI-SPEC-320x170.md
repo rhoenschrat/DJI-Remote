@@ -1,36 +1,20 @@
-# DJI-Remote – UI Layout Specification (320×170)
+# UI Specification — 320x170 (Waveshare ESP32-S3-LCD-1.9)
 
-> Pixel-level layout reference for the Waveshare ESP32-S3-LCD-1.9 display variant.
-> The source of truth for layout values is `main/ui_layout.c` (preset `LAYOUT_320x170`) and
-> the individual screen modules (`main/ui_screen_*.c`). All positions are LVGL
-> widget coordinates set via `lv_obj_set_pos()` and read from the centralized
-> `ui_layout_t` struct (see `main/ui_layout.h`).
-
-**Display:** 320×170 TFT (ST7789V2), landscape, origin top-left `(0,0)`.
-
-**Hardware:** Waveshare ESP32-S3-LCD-1.9 (ESP32-S3R8).
-
-**Rendering:** All UI elements are LVGL widgets. Positions listed below
-correspond to LVGL absolute or parent-relative coordinates. LVGL handles
-dirty-region tracking and partial redraws automatically.
-
-**Design differences from 320×240 preset:**
-- Camera Mode Icon row removed from camera blocks (saves 24px height)
-- Video Mode Text row removed from camera blocks (saves 24px height)
-- Buttons displayed as colored squares with icon only — no text label
-- Button colors reflect hardware button colors: Red (A), Yellow (B), Blue (C)
-- GPS shows icon only — no coordinate text; Red = no fix, Green = fix
-- Notification text fills the space between buttons and GPS icon in one unified bottom row
-- Submenu screens: no title bar (camera slot name), no notification area
-- Submenu buttons: 3 vertical colored squares on the right edge (same style as main screen)
-
-**Visual reference:** [main-screen-320x170-mockup.png](main-screen-320x170-mockup.png)
+> Authoritative pixel-level specification for the 320x170 layout preset.
+> For the 320x240 M5Stack layout, see [UI-SPEC.md](UI-SPEC.md).
 
 ---
 
-## 1. Main Shutter Screen
+## 1. Display
 
-### 1.1 Top-Level Regions
+- Resolution: 320x170 px, landscape (HAL sets `swap_xy = true` in LVGL port)
+- Origin: top-left `(0, 0)`
+
+---
+
+## 2. Main Screen
+
+### 2.1 Camera Blocks — Top-Level Regions
 
 | Region | X | Y | Width | Height |
 |--------|---|---|-------|--------|
@@ -39,260 +23,224 @@ dirty-region tracking and partial redraws automatically.
 | Camera 2 Block | 215 | 5 | 100 | 134 |
 | Bottom Row | 0 | 143 | 320 | 27 |
 
-### 1.2 Bottom Row Sub-Regions
+### 2.2 Camera Block Internal Offsets
 
-All elements in the bottom row share `y=143`, `height=27`.
+| Sub-Section | X Offset | Y Offset | Width | Height | Notes |
+|-------------|----------|----------|-------|--------|-------|
+| Selection Indicator | +1 | +1 | 97 | 4 | 97px avoids overlapping the 1px block border |
+| Title (Model Name) | +5 | +9 | 90 | 20 | |
+| Status Icon | +38 | +29 | 24 | 24 | Centered |
+| Recording Timer | +5 | +58 | 90 | 16 | |
+| SD Card Icon | +5 | +80 | 24 | 24 | |
+| SD Card Text | +34 | +85 | 61 | 16 | |
+| Battery Icon | +5 | +108 | 24 | 24 | |
+| Battery Text | +34 | +113 | 61 | 16 | |
+| SD Row Background | +0 | +80 | 98 | 24 | Warning background, inside the 1 px border; hidden at normal level |
+| Battery Row Background | +0 | +108 | 98 | 24 | As above; 4 px gap to the SD row |
+| Busy Indicator | +34 | +84 | 32 | 32 | `busy_icon_32`, cyan, transparent; hidden unless the slot is busy |
 
-| Region | X | Y | Width | Height |
-|--------|---|---|-------|--------|
-| Button A (Red) | 5 | 143 | 27 | 27 |
-| Button B (Yellow) | 36 | 143 | 27 | 27 |
-| Button C (Blue) | 67 | 143 | 27 | 27 |
-| Notification Area | 99 | 143 | 189 | 27 |
-| GPS Status Icon | 291 | 145 | 24 | 24 |
+Mode Icon row and Video Mode Text row are **absent** in this preset.
 
-**Button appearance:**
-- Solid colored background square: Red `rgb(255,0,0)` / Yellow `rgb(255,255,0)` / Blue `rgb(0,0,255)`
-- Icon: 24×24, centered at offset `(2,2)` in the 27×27 square, color Black
-- No text label
+The status icon uses the same priority list and colours as 320×240
+(`UI-SPEC.md` §2.6), including the yellow `alert_icon` warning triangle for an
+unresponsive slot as the first match. Only the position differs.
 
-**Notification Area contents:**
-- Temporary text messages at `(99, 143)` — status feedback, left-aligned, vertically centered
+**Busy indicator.** A static cyan `busy_icon_32` (no
+blink or rotation) is shown per slot while an action on that slot is running
+(connect, start/stop recording, photo, sleep, wake, snapshot, disconnect,
+unpair). It is centred horizontally (`(100 − 32) / 2 = 34`) and sits in the
+lower half of the block (y 84–115), so title, status icon and recording timer
+stay visible; it covers the middle of the SD and battery rows. It is the last
+child of the block, so it is drawn on top. Layout: `L->busy.main_*`.
 
-**GPS Status Icon:**
-- `gps_icon` 24×24 at `(291, 145)`
-- Color: Red = no fix, Green = valid fix
-- No coordinate text
+### 2.3 Bottom Row Contents
 
-### 1.3 Button Display Modes
+| Element | X | Y | Width | Height | Notes |
+|---------|---|---|-------|--------|-------|
+| GPS Icon | 5 | 145 | 24 | 24 | Leftmost; icon-only (no coordinate text); map pin `gps_icon` (UI-SPEC §1) |
+| Button A | 32 | 143 | 96 | 27 | Black background, 24x24 icon at (0,1), label at (29,7), white icon + white text |
+| Button B | 128 | 143 | 96 | 27 | Same style as Button A |
+| Button C | 224 | 143 | 96 | 27 | Same style as Button A |
 
-| Mode | Condition | Visible |
-|------|-----------|---------|
-| `BUTTONS_MODE_SCAN_ONLY_C` | Boot scan active | C only: `scanning_icon` |
-| `BUTTONS_MODE_BOOT_CONNECT_HIDDEN` | Connecting after scan | None (black) |
-| `BUTTONS_MODE_NORMAL` | Standard operation | All three with dynamic mapping |
+The Notification Area is intentionally absent on 320×170; status feedback that
+previously rendered there is omitted on this preset to make room for the
+M5Stack-style buttons that the housing's button positions require.
 
----
+Math: `32 + 3 × 96 = 320` (no gaps between buttons; the 5 + 24 = 29 GPS slot
+leaves a 3 px gap to Button A's left edge).
 
-## 2. Camera Block Layout
+Button labels and visibility per mode are shared with 320×240 (UI-SPEC §1,
+Button Area Display Modes): during the boot scan A is hidden, B shows
+`slots_icon` + "Slots" and C `scanning_icon` + "Stop".
 
-Each camera block uses a base coordinate (`base_x`, `base_y`) with fixed
-offsets. The same layout is used for all three slots.
+### 2.4 Button Colors
 
-### 2.1 Sub-Section Offsets
+Bottom-row buttons on 320×170 match the M5Stack 320×240 visual style
+(icon + text label, white-on-black). The same buttons are used on the
+submenu and mode-switch screens (§3.5, §4). No screen on 320×170 uses the
+former colored-square button style.
 
-| Sub-Section | X Offset | Y Offset | Width | Height |
-|-------------|----------|----------|-------|--------|
-| Selection Indicator | +0 | +0 | 97 | 4 |
-| Title (Model Name) | +5 | +6 | 90 | 22 |
-| Status Icon | +5 | +30 | 90 | 28 |
-| Recording Timer | +5 | +61 | 90 | 22 |
-| SD Card Status | +5 | +86 | 90 | 22 |
-| Battery Status | +5 | +111 | 90 | 22 |
+| Button | Background Color | Icon Color | Label Color |
+|--------|------------------|------------|-------------|
+| A | Black | White | White |
+| B | Black | White | White |
+| C | Black | White | White |
 
-> **Note:** Camera Mode Icon and Video Mode Text are omitted in this preset
-> compared to the 320×240 layout. These rows are not rendered.
+State-specific icon colors (e.g. red `record_icon` when recording) are applied
+at runtime by `set_button()` and override the default white.
 
-### 2.2 Selection Indicator
+### 2.5 GPS Color Difference
 
-- Red fill = selected, Black fill = not selected
-- In "All Cameras" mode: all three indicators are red
-
-### 2.3 Title Area
-
-- Model name from `device_id`: Action 4, Action 5, Action 6, Osmo 360
-- Shown only when slot is paired (even if disconnected)
-- Larger font, left-aligned
-
-### 2.4 Status Icon
-
-28×28 icon, centered horizontally within the 90px wide area (x offset +31 from area left = `base_x + 36`).
-Center point: `(base_x + 36, base_y + 44)`.
-
-Priority order (first match wins):
-
-1. Connected + paused → `pause_icon` (white)
-2. Connected + recording → `record_icon` (red)
-3. Connected + sleeping → `sleep_icon` (white)
-4. Not paired → `bluetooth_icon` (white)
-5. Connecting → `connecting_icon` (blue)
-6. Found in boot scan → `found_icon` (green)
-7. Paired but disconnected → `bluetooth_icon` (blue)
-
-### 2.5 Recording Timer
-
-- `hh:mm:ss` format, centered in 90px area
-- Recording → shows `record_time`
-- Paused → shows `remain_time`
-- Larger font
-
-### 2.6 SD Card Status
-
-- Icon: `sd_card_icon` 20×20 at `(base_x + 5, base_y + 86)`
-- Text: capacity string at `(base_x + 30, base_y + 86)`, width=65, vertically centered
-- Color thresholds: >16 GB white, ≤16 GB yellow, ≤6 GB red
-
-### 2.7 Battery Status
-
-- Icon: threshold-based battery icon 20×20 at `(base_x + 5, base_y + 111)`
-  - >75% → `battery_100_icon`, ≤75% → `battery_75_icon`, ≤50% → `battery_50_icon`,
-    ≤25% → `battery_25_icon`, ≤10% → `battery_0_icon`
-- Text: `"NN %"` at `(base_x + 30, base_y + 111)`, width=65, vertically centered
-- Color thresholds: >25% white, ≤25% yellow, ≤10% red
+| State | Color |
+|-------|-------|
+| No fix | Red |
+| Valid fix | **Green** (not Yellow as in 320x240) |
 
 ---
 
 ## 3. Submenu Screens (Settings, Pairing)
 
-Both Settings and Pairing screens share a unified layout. The 320×240 title bar
-(camera slot name) and notification area are omitted. Buttons are placed as
-three vertical colored squares on the right edge, matching the main screen style.
-
-**Visual reference:** [320x170-Settings.png](320x170-Settings.png)
-
-### 3.1 Top-Level Regions
-
-The full 320×170 display area is used. No outer margins.
+### 3.1 Regions
 
 | Region | X | Y | Width | Height |
 |--------|---|---|-------|--------|
-| Entry Area | 0 | 0 | 288 | 170 |
-| Button Column | 293 | 0 | 27 | 170 |
+| Entry Area | 0 | 0 | 320 | 143 |
+| Bottom Row | 0 | 143 | 320 | 27 |
 
-The 5px gap between entry area and button column (`x=288` to `x=293`) acts as
-a visual separator.
+No title bar. The entry area is a **2 columns × 4 rows** grid (up to 8
+entries) above the bottom row. The last row ends at y = 140, leaving a 3 px
+gap to the bottom row.
 
-### 3.2 Entry Layout
+### 3.2 Entry Grid
 
-5 entries fill the full 170px height: **entry height = 34px each** (5 × 34 = 170).
+Entries fill **column-major**: the left column top to bottom first, then the
+right column. Button B navigates in the same order (index order).
 
-| Entry | Y |
-|-------|---|
-| Entry 0 | 0 |
-| Entry 1 | 34 |
-| Entry 2 | 68 |
-| Entry 3 | 102 |
-| Entry 4 | 136 |
+| idx | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|-----|---|---|---|---|---|---|---|---|
+| X | 0 | 0 | 0 | 0 | 160 | 160 | 160 | 160 |
+| Y | 1 | 36 | 71 | 106 | 1 | 36 | 71 | 106 |
 
-**Entry structure** (all offsets relative to entry top-left `(0, entry_y)`):
+`x = base_x + (idx / rows) × col_w`, `y = entry_first_y + (idx % rows) × entry_spacing`
+with `rows = 4`, `col_w = 160`, `entry_first_y = 1`, `entry_spacing = 35`.
 
-| Element | X | Y offset | Width | Height |
-|---------|---|----------|-------|--------|
+With **≤ 4 entries** the list is a single column spanning the full width
+(Slots screens, §4A). With **> 4 entries** the right column opens; entry
+positions never move, only the label widths shrink. Settings has 5 entries
+(Mode Switch, Sleep/Wakeup, Connect/Disconnect, Pair/Unpair, **Slots**), so
+"Slots" is the first entry of the right column (idx 4: x = 160, y = 1) and
+all Settings labels are 118 px wide.
+
+### 3.3 Entry Elements
+
+| Element | X Offset within entry | Y Offset within entry | Width | Height |
+|---------|-----------------------|-----------------------|-------|--------|
 | Selection Indicator | 0 | 0 | 4 | 34 |
 | Icon | 10 | 5 | 24 | 24 |
-| Label | 38 | 9 | 246 | 24 |
+| Label | 38 | 9 | 278 (single column) / 118 (two columns) | 24 |
 
-- Selection Indicator: Red fill = selected, Black = not selected
-- Icon: 24×24 white icon, vertically centered in 34px row (`y + 5`)
-- Label: left-aligned, white text
+Icon is vertically centered in the 34px row (`y + 5` = (34-24)/2 rounded down).
+Label offset `38` = indicator(4) + gap(6) + icon(24) + gap(4).
+Label width = column span − 38 − 4 (right margin): `320 − 42 = 278` or
+`160 − 42 = 118`. Labels use `LV_LABEL_LONG_DOT` — text that does not fit
+ends with an ellipsis.
 
-### 3.3 Button Column
+### 3.4 Pairing Scanning Placeholder
 
-3 buttons grouped tightly at top-right, 27×27 squares, 4px gap between each.
+There is no notification area on 320×170. While Pairing has found no camera
+yet, a "Scanning..." label is shown at entry 0's label position:
 
-| Button | X | Y | Width | Height |
-|--------|---|---|-------|--------|
-| Button A (Red) | 293 | 3 | 27 | 27 |
-| Button B (Yellow) | 293 | 34 | 27 | 27 |
-| Button C (Blue) | 293 | 65 | 27 | 27 |
+| Element | X | Y | Width | Font | Color |
+|---------|---|---|-------|------|-------|
+| Scanning placeholder | 38 | 10 | 278 (`LONG_DOT`) | `font_heading` (Montserrat 16) | Cyan |
 
-Button appearance: solid colored square (`rgb(255,0,0)` / `rgb(255,255,0)` / `rgb(0,0,255)`),
-24×24 icon at offset `(2,2)` in black. No text label.
+It is hidden as soon as the first camera appears and shown again when the
+camera list is reset.
 
-### 3.4 Settings Entries
+### 3.5 Bottom-Row Buttons
 
-| # | Icon | Label | Notes |
-|---|------|-------|-------|
-| 0 | `back_icon` | "Back" | Always present |
-| 1 | `highlight_icon` | "Highlight" | Toggle onboard WS2812 LED |
-| 2 | `sleep_icon` / `wakeup_icon` | "Sleep" / "Wakeup" | Dynamic |
-| 3 | `connect_icon` / `disconnect_icon` | "Connect" / "Disconnect" | Dynamic |
-| 4 | `pair_icon` / `unpair_icon` | "Pair Camera" / "Unpair Camera" | Dynamic |
+Identical geometry and style to the main screen (§2.3): black background,
+24×24 white icon at (0,1), white label at (29,7). The GPS slot (x 0–31) stays
+**empty** on submenu screens, except for the busy indicator on the Settings
+screen:
 
-### 3.5 Settings Buttons
+| Element | X | Y | Width | Height | Notes |
+|---------|---|---|-------|--------|-------|
+| Busy Indicator (Settings only) | 5 | 145 | 24 | 24 | `busy_icon_24`, cyan, for the slot the menu belongs to; hidden otherwise. `L->busy.menu_*` |
 
-| Button | Icon | Action |
-|--------|------|--------|
-| Button A (Red) | `select_icon` | Select highlighted entry |
-| Button B (Yellow) | `next_icon` | Move to next entry |
-| Button C (Blue) | *(no function)* | — |
+| Button | X | Y | Width | Height | Icon | Label |
+|--------|---|---|-------|--------|------|-------|
+| A | 32 | 143 | 96 | 27 | `select_icon` | Select |
+| B | 128 | 143 | 96 | 27 | `next_icon` (**unrotated**) | Next |
+| C | 224 | 143 | 96 | 27 | `back_icon` | Back |
 
-### 3.6 Pairing Screen Entries
+Button B's `next_icon` is not rotated on 320×170 because navigation can move
+into a second column (`submenu.next_icon_rotated = false`). "Back" is not a
+list entry — Button C leaves the screen (Pairing: also stops the scan).
 
-| # | Icon | Label |
-|---|------|-------|
-| 0 | `back_icon` | "Back" |
-| 1–4 | `photo_icon` | Discovered camera name |
+---
+
+## 4A. Slots Screens
+
+Two screens with the submenu row geometry of §3.2/§3.3, always a **single
+full-width column** (≤ 4 rows: column 0, label span 320). No title, no
+notification area, no busy indicator; the GPS slot of the bottom row stays
+empty. Bottom row identical to §3.5 (A Select, B Next unrotated, C Back).
+
+**Cycle list** (`SCREEN_SLOTS_CYCLE`): 4 rows = cycle entries in order.
+
+| Element | X | Y (row 0..3) | Width | Notes |
+|---------|---|--------------|-------|-------|
+| Selection Indicator | 0 | 1 / 36 / 71 / 106 | 4 | Red = highlighted entry |
+| Icon | 10 | row + 5 | 24 | `slots_icon`, white |
+| Label | 38 | row + 9 | 278 | Derived name: "Slot 1", "Slot 2 + 3", "Slot 1 + 2 + 3", "Empty" |
+
+**Entry screen** (`SCREEN_SLOTS_ENTRY`): 3 rows "Slot 1", "Slot 2", "Slot 3".
+
+| Element | X | Y (row 0..2) | Width | Notes |
+|---------|---|--------------|-------|-------|
+| Selection Indicator | 0 | 1 / 36 / 71 | 4 | Red = highlighted slot |
+| Label | 38 | row + 9 | 244 | Ends 4 px before the check mark |
+| Check Mark | 286 | row + 5 | 24 | `check_icon`, green; visible only for active slots |
+
+Check mark x = `screen_w − (base_x + icon_ofs_x) − 24` = `320 − 10 − 24`
+(mirrors the left icon inset). No left icon on the entry screen.
+
+Rejected toggle (would leave every entry Empty): the highlighted row's label
+turns red for 1 s (`lv_timer`, one-shot), then white again.
 
 ---
 
 ## 4. Mode Switch Screen
 
-The Mode Switch screen uses the same entry-area / button-column layout as the
-submenu screens. Only one content row is needed (current mode display), so the
-layout is simplified.
-
 | Region | X | Y | Width | Height |
 |--------|---|---|-------|--------|
-| Mode Icon | 10 | 40 | 270 | 40 |
-| Mode Label | 10 | 85 | 270 | 80 |
-| Button Column | 293 | 0 | 27 | 170 |
+| Content Area | 0 | 0 | 320 | 143 |
+| Mode Icon | 148 | 28 | 24 | 24 |
+| Mode Label (2 lines, centered) | 0 | 73 | 320 | ≈42 |
+| Bottom Row | 0 | 143 | 320 | 27 |
 
-- **Mode Icon:** Same logic as Camera Mode Area (photo/video from `1D02`)
-- **Mode Label:** Same logic as Video Mode Area (`1D02` or `1D06` source), larger font, centered
+No title bar. Icon and text are centered horizontally on the full 320 px
+width and vertically in the 143 px content area.
 
-### 4.1 Mode Switch Buttons
-
-| Button | Icon | Action |
-|--------|------|--------|
-| Button A (Red) | `switch_icon` | Switch mode → sends QS button key reporting |
-| Button B (Yellow) | `back_icon` | Return to Main Screen |
-| Button C (Blue) | *(no function)* | — |
+| Button | X | Icon | Label | Function |
+|--------|---|------|-------|----------|
+| A | 32 | `switch_icon` | Switch | Quick Switch |
+| B | 128 | — | — | **empty** (no widget, no function) |
+| C | 224 | `back_icon` | Back | Return to main screen |
 
 ---
 
-## 5. Color Reference
+## 5. Color Summary
 
-### Default Colors
+| Element | 320x240 | 320x170 |
+|---------|---------|---------|
+| GPS valid fix | Yellow | Green |
+| Bottom-row Button A/B/C background (all screens) | Black | Black |
+| Bottom-row Button A/B/C icon + label color (all screens) | White | White |
+| Submenu selection indicator | Red | Red |
+| Pairing "Scanning..." text | Cyan (notification area) | Cyan (entry-area placeholder) |
+| Busy indicator (main screen, Settings) | — (not shown) | Cyan |
+| All threshold colors (battery, SD) | unchanged | unchanged (same row warning style, UI-SPEC §2.10) |
 
-| Element | Color |
-|---------|-------|
-| Background | Black |
-| Default icon | White |
-| Default text | White |
-| Button A background | Red `rgb(255, 0, 0)` |
-| Button B background | Yellow `rgb(255, 255, 0)` |
-| Button C background | Blue `rgb(0, 0, 255)` |
-| Button icon | Black |
-| Selected indicator | Red |
-
-### Dynamic Icon Colors
-
-| State | Color |
-|-------|-------|
-| Recording | Red |
-| Paired not connected | Blue (bluetooth_icon) |
-| Not paired | White (bluetooth_icon) |
-| Found in scan | Green (found_icon) |
-| Connecting | Blue (connecting_icon) |
-| GPS no fix | Red |
-| GPS valid fix | Green |
-
-> **Note:** GPS icon uses Green (not Yellow) for valid fix in this preset,
-> to match the mockup visual. The 320×240 preset uses Yellow for valid fix.
-
-### Threshold Colors (SD Card)
-
-| Condition | Color |
-|-----------|-------|
-| >16 GB free | White |
-| ≤16 GB free | Yellow |
-| ≤6 GB free | Red |
-
-### Threshold Colors (Battery)
-
-| Condition | Color |
-|-----------|-------|
-| >25% | White |
-| ≤25% | Yellow |
-| ≤10% | Red |
+No colored-square button style is used anywhere on 320×170.
