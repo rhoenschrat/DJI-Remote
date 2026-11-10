@@ -292,6 +292,10 @@ Thanks to:
 - Espressif for ESP-IDF
 - The open-source community
 
+Special thanks to **Konrad Iturbe** ([@KonradIT](https://github.com/KonradIT)),
+whose feedback contributed significantly to the stability improvements in
+v1.3.0.
+
 
 # Feedback
 
