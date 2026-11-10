@@ -49,12 +49,17 @@ selected:
 - not recording → **start recording** (in photo mode: take a photo)
 - recording → **stop recording**
 - asleep → **wake up and take a snapshot**
+- paired but not connected → **connect** (same as **Connect** on Button A)
 
-The long press works with every selection, including **All Cameras**. If the
-camera is not connected (empty slot, disconnected, connecting or not
-responding), the long press is ignored. It does not pair or reconnect a
-camera, and it does nothing while the remote is still searching for cameras
-after startup.
+The long press works with every selection, including combinations such as
+**Slot 1 + 2 + 3**. It is ignored on an empty slot (it does not open
+pairing), while a camera is still connecting, and on a camera that is not
+responding (use **Connect** on Button A or in the Options Menu for that). It
+also does nothing while the remote is still searching for cameras after
+startup.
+
+While a camera connects, the other buttons react only after the connection
+attempt has finished (same as with **Connect** on Button A).
 
 ### Busy Indicator (Waveshare)
 
@@ -83,7 +88,7 @@ for:
 | Unpair | the camera is unpaired |
 
 It also disappears if the action fails, the camera disconnects or stops
-responding, and after **10 seconds** at the latest. In **All Cameras** mode
+responding, and after **10 seconds** at the latest. In multi-camera mode
 every affected camera shows its own indicator, and each one disappears on
 its own. Highlight tags and Quick Switch show no indicator. An action
 started in the Options menu stays visible after you go back to the Main
@@ -106,12 +111,17 @@ If all three camera slots are unpaired, the Main Screen shows empty camera block
 ### Pairing Cameras
 
 1. Press **Button B** to select a camera slot  
-   (Camera 1 → Camera 2 → Camera 3 → All Cameras → …)  
+   (factory cycle: Slot 1 → Slot 2 → Slot 3 → Slot 1 + 2 + 3 → …)  
 2. Stop on a slot showing **Not paired**.  
 3. Press **Button A** or **Button C** to open the **Pairing Menu**.  
 4. The remote scans for nearby DJI cameras.  
 5. Use **Button B** to select a camera from the list.  
-6. Press **Button A** to pair it to the selected slot.
+6. Press **Button A** to pair it to the selected slot.  
+7. Press **Button C** at any time to cancel the scan and go back.
+
+While no camera has been found yet, the screen shows **Scanning...**. On the
+Waveshare (320×170) display the list holds up to 8 cameras in two columns;
+long names end with "…".
 
 ### Camera Slots Remain Persistent
 
@@ -127,15 +137,30 @@ When paired cameras exist, the device performs an **automatic boot scan**.
 
 - The remote searches for all paired cameras at once.
 - As cameras are found, they appear with a **green “found” icon**.
-- After the scan ends or all cameras are found, connection begins automatically.
+- The scan ends as soon as all paired cameras are found. If a camera is
+  missing (for example switched off), the scan ends about **10 seconds after
+  the first camera was found**, and at the latest after 30 seconds.
+- After the scan ends, connection begins automatically. A camera that was
+  not found is shown as paired, not connected; connect it later with
+  **Button A**.
+- If you restart the remote while the cameras were connected (for example
+  switch it off and on again at once), the cameras need up to about
+  5 seconds before they can be found again. They first have to notice that
+  the old connection is gone.
 
 ### Stopping the Boot Scan
 
 During the active scan:
 
-- Only **Button C** is active.
-- It displays **Stop**, with a scanning icon.
-- Press **Button C** to immediately stop scanning and start connecting to already discovered cameras.
+- Only **Button B** and **Button C** are active.
+- **Button C** displays **Stop**, with a scanning icon. Press it to
+  immediately stop scanning and start connecting to already discovered
+  cameras.
+- **Button B** displays **Slots**. Press it to open the slot cycle
+  configuration (see "Slots" in 2.4). The scan continues in the background;
+  when you go back, the Main Screen shows the current state. If the scan ends
+  while you are still in the configuration, the cameras connect
+  automatically; the buttons may react with a short delay during that time.
 
 ### Manual Reconnect After Boot
 
@@ -147,19 +172,98 @@ If a paired camera did not connect:
 The camera status icon changes to **connecting** immediately, and a focused
 reconnect scan for that specific camera begins.
 
+### If a Camera Loses Its Connection
+
+If a camera drops its connection during use (for example, it is switched off
+or goes out of range):
+
+- Its status icon switches to the **paired, not connected** icon. There is no
+  message and no sound.
+- The other cameras keep working normally: status, GPS and recording control
+  are not affected.
+- The remote does **not** reconnect on its own. To reconnect, select that
+  camera with **Button B** and press **Button A** ("Connect").
+- Short radio dropouts (a few seconds, for example when your body or the
+  bike shields the camera) do not close the connection. A camera that stays
+  out of range is shown as disconnected after about **5 seconds**.
+- In multi-camera mode, disconnected cameras are skipped.
+- A camera that was asleep when it lost the connection is shown as awake
+  afterwards. Its real state is shown again as soon as it is reconnected.
+
+### Messages After a Button Press
+
+Camera commands are sent in the background, so the remote never waits for a
+camera:
+
+- Result messages such as "Recording Started" or "Photo Taken" can appear a
+  moment after the press.
+- If you press a button again before the camera has answered the previous
+  command, **"Busy"** is shown and the second press is ignored. Just press
+  again a moment later.
+- A camera that does not answer no longer freezes the remote. Its command
+  fails after a few seconds ("Start Failed", "Stop Failed"), while the other
+  cameras and all buttons keep working.
+
+### If a Camera Stops Responding
+
+Sometimes a camera stays connected but stops sending its status. The remote
+watches every connected, awake camera for this:
+
+- After about **6 seconds** without status, the camera's status icon changes
+  to a **yellow warning triangle**. Commands and GPS are no longer sent to it.
+- If the camera starts sending again, the normal icon returns on its own.
+- After about **15 seconds** without status, the remote closes the connection.
+  The camera is then shown as **paired, not connected**.
+- To recover the camera right away, select it with **Button B** and press
+  **Button A** ("Connect"), or use **Settings → Connect**. The remote closes
+  the old connection first and then reconnects. If the camera is out of
+  range, closing the old connection can take up to about 6 seconds; the
+  connecting icon is shown meanwhile.
+- In multi-camera mode, a camera that is not responding is skipped.
+- In Settings, **Sleep/Wakeup** and **Mode Switch** show "Not responding" for
+  such a camera. **Unpair** still works.
+- Sleeping cameras are not watched; a sleeping camera never shows the
+  triangle.
+
+### Low SD Card and Battery Warnings
+
+Each camera block shows the free space on the SD card and the battery
+level at the bottom. When a value gets low, the whole row is colored so you
+can see it at a glance:
+
+| Row | Yellow row (black text) | Red row (white text) |
+|-----|-------------------------|----------------------|
+| SD card | 16 GB free or less | 6 GB free or less |
+| Battery | 25 % or less | 10 % or less |
+
+The two rows are independent: for example, the SD card row can be yellow
+while the battery row stays normal. The rows (and their colors) are shown
+for connected cameras, including sleeping ones.
+
+Firmware builds can instead use the older style, where only the text and
+icon turn yellow or red (build option, see the build documentation).
+
 
 # 2. Single-Camera Mode
 
-Single-camera mode is active whenever one camera (Camera 1, 2, or 3) is selected.
+Single-camera mode is active whenever the selected cycle entry contains
+exactly one camera slot (Slot 1, 2 or 3).
 
 
 ## 2.1 Selecting a Camera
 
-Press **Button B** to cycle:
+Press **Button B** to move to the next entry of the **slot cycle**. The
+factory cycle is:
 
-> Camera 1 → Camera 2 → Camera 3 → All Cameras → …
+> Slot 1 → Slot 2 → Slot 3 → Slot 1 + 2 + 3 → …
 
-The selected camera has a red highlight bar.
+The cycle has four entries and can be changed under **Slots** (see 2.4):
+from the Options Menu, or with **Button B** while the remote searches for
+its cameras after switching on. Each entry is a single slot, a combination of slots
+(e.g. **Slot 1 + 3**) or **Empty**. Empty entries are skipped.
+
+Every selected camera has a red highlight bar; with a combination, all
+cameras of the entry are highlighted.
 
 
 ## 2.2 Recording Control
@@ -194,13 +298,66 @@ Press **Button C** when the selected camera is **not recording**.
 
 The Options Menu includes:
 
-- Back  
 - Mode Switch  
 - Sleep / Wake  
 - Connect / Disconnect  
-- Unpair  
+- Pair / Unpair  
+- Slots (always last)
 
-Use **Button B** to navigate, **Button A** to select.
+Use **Button B** to navigate, **Button A** to select.  
+Press **Button C** to go back to the Main Screen.
+
+On the Waveshare (320x170) the five entries are shown in two columns.
+
+### Mode Switch
+
+Shows the camera's current mode.
+
+- **Button A** — switch to the next camera mode (Quick Switch)
+- **Button B** — no function
+- **Button C** — go back to the Main Screen
+
+### Slots (Configuring the Slot Cycle)
+
+Defines which selections **Button B** cycles through on the Main Screen.
+The setting is global: it is the same no matter from which camera the
+Options Menu was opened, and it is available in every connection state.
+
+There are two ways to open it:
+
+- **Options Menu → Slots** (needs an entry with exactly one camera, because
+  only such an entry opens the Options Menu)
+- **Button B "Slots"** during the boot scan after switching on (see
+  "Stopping the Boot Scan" in 1.2). This works whenever at least one camera
+  is paired, even if no entry has a single camera.
+
+**Screen 1 – Cycle entries** lists the four entries in cycle order by name,
+e.g. **Slot 1**, **Slot 1 + 2**, **Slot 1 + 3**, **Empty**.
+
+- **Button A** (Select) — edit the highlighted entry (Screen 2)
+- **Button B** (Next) — highlight the next entry
+- **Button C** (Back) — go back to the Main Screen and save the cycle
+
+**Screen 2 – Slots of one entry** lists Slot 1, Slot 2 and Slot 3. A green
+check mark at the right edge marks every slot that belongs to the entry.
+
+- **Button A** (Select) — add or remove the highlighted slot
+- **Button B** (Next) — highlight the next slot
+- **Button C** (Back) — go back to Screen 1
+
+Rule: at least one entry must contain a camera. Removing the last camera of
+the last non-empty entry is refused: the row flashes red for about one
+second and nothing changes.
+
+A cycle of combinations only (e.g. **Slot 1 + 2** → **Slot 1 + 2 + 3**) is
+allowed. The Options Menu (Mode Switch, Sleep/Wake, Connect, Pair/Unpair)
+then cannot be opened; to get it back, add an entry with a single camera via
+**Button B "Slots"** during the next boot scan.
+
+The cycle is saved when you leave Screen 1 with **Back** and survives a
+restart. If the entry that was selected is now Empty, the selection moves to
+the next non-empty entry. To restore the factory cycle, edit the entries back
+to Slot 1 → Slot 2 → Slot 3 → Slot 1 + 2 + 3.
 
 
 ## 2.5 Snapshot While Sleeping
@@ -218,10 +375,14 @@ The remote handles wake timing and synchronization automatically.
 
 # 3. Multi-Camera Mode
 
-Active when the selection is set to **All Cameras**.
+Active when the selected cycle entry contains two or more cameras, e.g.
+**Slot 1 + 2 + 3** (formerly "All Cameras") or **Slot 1 + 3**. Everything in
+this section applies **only to the cameras of the selected entry**; the
+other cameras are not affected. "All cameras" below means "all cameras of
+the entry". The Options Menu is not available in this mode.
 
 
-## 3.1 Start/Stop Recording for All Cameras
+## 3.1 Start/Stop Recording for All Cameras of the Entry
 
 Press **Button A**:
 
@@ -230,12 +391,12 @@ Press **Button A**:
 
 Sleeping cameras are awakened automatically and sequentially when needed.
 
-To start or stop **one** camera while **All Cameras** stays selected, hold its
+To start or stop **one** camera while a combination stays selected, hold its
 button for 1 s: **A** = Camera 1, **B** = Camera 2, **C** = Camera 3. The
 other cameras are not affected.
 
 
-## 3.2 Sleep & Wake All Cameras
+## 3.2 Sleep & Wake All Cameras of the Entry
 
 Press **Button C**.
 
@@ -247,7 +408,7 @@ Priority logic:
 4. Else → No action  
 
 
-## 3.3 Highlight Tags for All Cameras
+## 3.3 Highlight Tags for All Cameras of the Entry
 
 If multiple cameras are recording and support highlight tagging:
 
@@ -287,6 +448,8 @@ The remote reads GPS data from the external GPS module and displays it in the GP
 
 ## 4.1 GPS Information Display
 
+The GPS icon is a **map pin** at the bottom of the Main Screen.
+
 ### No Fix
 
 - Red GPS icon  
@@ -294,8 +457,9 @@ The remote reads GPS data from the external GPS module and displays it in the GP
 
 ### Valid Fix
 
-- Yellow GPS icon  
-- Latitude & longitude shown with two decimals  
+- Yellow GPS icon (green on the Waveshare)  
+- Latitude & longitude shown with two decimals (M5Stack only; the Waveshare
+  shows the icon only)  
 
 Updates occur even when cameras are asleep.
 
@@ -340,8 +504,7 @@ what happened, when, and with which camera:
 If the GPS had a fix, each entry also has the date and time.
 
 To read the record, connect the remote by USB and run
-`tools/diag/dji_diag read -p <port>` from the firmware repository (see
+`tools/diag/dji_diag read -p <port>` (see
 [`tools/diag/README.md`](../tools/diag/README.md)). Reading restarts the
 remote. Your pairings are not affected, and updating the firmware keeps the
 record.
-

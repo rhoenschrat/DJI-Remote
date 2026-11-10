@@ -88,18 +88,23 @@ main/
  ├── ui_screen_pairing.c/.h        → Pairing screen LVGL widget tree
  ├── ui_screen_settings.c/.h       → Settings screen LVGL widget tree
  ├── ui_screen_mode_switch.c/.h    → Mode Switch screen LVGL widget tree
+ ├── ui_screen_slots.c/.h          → Slots screens (slot cycle configuration)
+ ├── slot_cycle.c/.h               → Configurable Button B slot cycle, NVS persistence
+ ├── slot_busy.c/.h                → Per-slot busy state for the busy indicator
  ├── ui_screen_splash.c/.h         → Boot splash screen (LVGL)
  ├── lvgl_icons.c/.h               → LVGL image descriptors (1-bit icons)
  ├── splash_logo.c/.h              → Splash logo image data
  ├── m5stack_basic_v27_hal.c/.h    → M5Stack HAL (ESP32)
  ├── waveshare_s3_lcd19_hal.c/.h   → Waveshare HAL (ESP32-S3)
  ├── icons.c/.h                    → 1-bit packed icon bitmaps (source data)
- └── Kconfig.projbuild             → Board selector + GPS configuration
+ └── Kconfig.projbuild             → Board selector, GPS configuration, UI options
+                                     (UI_STATUS_WARN_STYLE: low SD/battery row look)
 
 logic/
  ├── connect_logic.c/.h            → BLE scanning & connect/reconnect logic
  ├── status_logic.c/.h             → Camera state updates, sleep/wake, snapshot logic
  ├── command_logic.c/.h            → Camera command execution
+ ├── command_worker.c/.h           → Per-slot command workers (button commands off the main task)
  ├── enums_logic.c/.h              → Camera state enumerations
  └── light_logic.c/.h              → RGB LED status indication
 
@@ -241,7 +246,8 @@ Button A on a sleeping camera:
 2. Send wake broadcast (3 seconds)
 3. Camera wakes (1D02 power_mode `3 → 0`)
 4. `status_logic.c` detects the transition and sends the snapshot key
-5. In "All Cameras" mode: sleeping cameras enter a serialized wake queue
+5. With a multi-camera cycle entry (e.g. Slot 1 + 2 + 3): the sleeping
+   cameras of that entry enter a serialized wake queue
 
 ---
 
