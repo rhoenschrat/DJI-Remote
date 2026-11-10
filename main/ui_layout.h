@@ -52,6 +52,15 @@ typedef struct {
         int32_t bat_icon_x, bat_icon_y, bat_text_x, bat_text_y;
     } cam_detail;
 
+    /* Warning backgrounds of the SD card and battery rows (plan 0019),
+     * relative to the camera block's content area, i.e. inside its 1 px
+     * border (x = 0 is the first inner pixel). Created before the row's icon
+     * and text so they are drawn below them. */
+    struct {
+        int32_t sd_x, sd_y, sd_w, sd_h;
+        int32_t bat_x, bat_y, bat_w, bat_h;
+    } row_bg;
+
     /* Status bar (notification + GPS) */
     struct {
         int32_t notif_x, notif_y;

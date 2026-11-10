@@ -16,10 +16,20 @@
 #include "enums_logic.h"
 #include "../gps/gps_reader.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 #include <string.h>
 #include <stdio.h>
 
 #define TAG "UI_SCR_MAIN"
+
+/* SD card / battery warning style (plan 0019, Kconfig UI_STATUS_WARN_STYLE).
+ * A C constant instead of #if around functions: both variants compile in
+ * every build, so the unused one cannot rot. */
+#ifdef CONFIG_UI_STATUS_WARN_BACKGROUND
+#define UI_WARN_BACKGROUND 1
+#else
+#define UI_WARN_BACKGROUND 0
+#endif
 
 /* ======================================================================
  * Widget Structures
@@ -33,8 +43,10 @@ typedef struct {
     lv_obj_t *vmode_label;
     lv_obj_t *status_icon;
     lv_obj_t *time_label;
+    lv_obj_t *sd_bg;        /* row warning background, below icon and text */
     lv_obj_t *sd_icon;
     lv_obj_t *sd_text;
+    lv_obj_t *bat_bg;
     lv_obj_t *bat_icon;
     lv_obj_t *bat_text;
     lv_obj_t *busy_icon;    /* NULL where the layout has no busy indicator */
@@ -76,17 +88,74 @@ static const lv_image_dsc_t *get_battery_lvgl_icon(uint8_t pct) {
     return &lvgl_battery_0_icon;
 }
 
-static lv_color_t get_battery_color(uint8_t pct) {
-    if (pct > 25) return ui_clr_white();
-    if (pct > 10) return ui_clr_yellow();
-    return ui_clr_red();
+/* Warning level of a status row; shared by both warning styles so the
+ * thresholds are identical */
+typedef enum {
+    ROW_LEVEL_NORMAL = 0,
+    ROW_LEVEL_WARN,         /* yellow */
+    ROW_LEVEL_CRIT,         /* red */
+} row_level_t;
+
+/* Look of one status row for a level in the compiled warning style */
+typedef struct {
+    bool       bg_visible;
+    lv_color_t bg;
+    lv_color_t fg;          /* icon and text */
+} row_style_t;
+
+static row_level_t bat_level(uint8_t pct) {
+    if (pct > 25) return ROW_LEVEL_NORMAL;
+    if (pct > 10) return ROW_LEVEL_WARN;
+    return ROW_LEVEL_CRIT;
 }
 
-static lv_color_t get_sd_color(uint32_t capacity_mb) {
+static row_level_t sd_level(uint32_t capacity_mb) {
     uint32_t gb_x10 = capacity_mb * 10 / 1024;
-    if (gb_x10 > 160) return ui_clr_white();
-    if (gb_x10 >  60) return ui_clr_yellow();
-    return ui_clr_red();
+    if (gb_x10 > 160) return ROW_LEVEL_NORMAL;
+    if (gb_x10 >  60) return ROW_LEVEL_WARN;
+    return ROW_LEVEL_CRIT;
+}
+
+/* Background style: yellow row + black fg, red row + white fg.
+ * Tint style (legacy): no background, fg yellow / red. */
+static row_style_t row_style(row_level_t level) {
+    row_style_t r = { .bg_visible = false, .bg = ui_clr_black(), .fg = ui_clr_white() };
+    if (level == ROW_LEVEL_NORMAL) {
+        return r;
+    }
+    if (UI_WARN_BACKGROUND) {
+        r.bg_visible = true;
+        r.bg = (level == ROW_LEVEL_WARN) ? ui_clr_yellow() : ui_clr_red();
+        r.fg = (level == ROW_LEVEL_WARN) ? ui_clr_black()  : ui_clr_white();
+    } else {
+        r.fg = (level == ROW_LEVEL_WARN) ? ui_clr_yellow() : ui_clr_red();
+    }
+    return r;
+}
+
+static void apply_row_style(lv_obj_t *bg, lv_obj_t *icon, lv_obj_t *text,
+                            row_level_t level) {
+    row_style_t r = row_style(level);
+    if (r.bg_visible) {
+        lv_obj_set_style_bg_color(bg, r.bg, 0);
+    }
+    ui_set_visible(bg, r.bg_visible);
+    ui_style_img_recolor(icon, r.fg);
+    lv_obj_set_style_text_color(text, r.fg, 0);
+}
+
+/* Plain rectangle below a status row; hidden until a warning level needs it */
+static lv_obj_t *create_row_bg(lv_obj_t *parent, int32_t x, int32_t y,
+                               int32_t w, int32_t h) {
+    lv_obj_t *bg = lv_obj_create(parent);
+    lv_obj_remove_style_all(bg);
+    lv_obj_set_pos(bg, x, y);
+    lv_obj_set_size(bg, w, h);
+    lv_obj_set_style_bg_color(bg, ui_clr_black(), 0);
+    lv_obj_set_style_bg_opa(bg, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(bg, LV_OBJ_FLAG_HIDDEN);
+    return bg;
 }
 
 static const lv_image_dsc_t *get_mode_icon(uint8_t camera_mode) {
@@ -235,6 +304,13 @@ static void create_camera_block(int idx) {
     lv_obj_set_style_text_color(cb->time_label, ui_clr_white(), 0);
     lv_obj_set_style_text_font(cb->time_label, L->font_body, 0);
     lv_label_set_text(cb->time_label, "");
+
+    /* Row warning backgrounds (plan 0019): created before the SD and
+     * battery icons and texts so they are drawn below them */
+    cb->sd_bg  = create_row_bg(cb->block, L->row_bg.sd_x, L->row_bg.sd_y,
+                               L->row_bg.sd_w, L->row_bg.sd_h);
+    cb->bat_bg = create_row_bg(cb->block, L->row_bg.bat_x, L->row_bg.bat_y,
+                               L->row_bg.bat_w, L->row_bg.bat_h);
 
     /* SD card icon */
     cb->sd_icon = lv_image_create(cb->block);
@@ -442,6 +518,11 @@ static void update_camera_block(int idx) {
     ui_set_visible(cb->sd_text,    show_full);
     ui_set_visible(cb->bat_icon,   show_full);
     ui_set_visible(cb->bat_text,   show_full);
+    if (!show_full) {
+        /* Backgrounds follow their rows; shown again by apply_row_style() */
+        ui_set_visible(cb->sd_bg,  false);
+        ui_set_visible(cb->bat_bg, false);
+    }
 
     if (!show_title) return;
 
@@ -483,9 +564,7 @@ static void update_camera_block(int idx) {
 
     /* SD card */
     uint32_t cap = st->remain_capacity;
-    lv_color_t sd_clr = get_sd_color(cap);
-    ui_style_img_recolor(cb->sd_icon, sd_clr);
-    lv_obj_set_style_text_color(cb->sd_text, sd_clr, 0);
+    apply_row_style(cb->sd_bg, cb->sd_icon, cb->sd_text, sd_level(cap));
     if (cap >= 1024) {
         uint32_t gb_int = cap / 1024;
         uint32_t gb_dec = (cap % 1024) * 10 / 1024;
@@ -497,11 +576,9 @@ static void update_camera_block(int idx) {
 
     /* Battery */
     uint8_t bat_pct = st->camera_bat_percentage;
-    lv_color_t bat_clr = get_battery_color(bat_pct);
     const lv_image_dsc_t *bat_ico = get_battery_lvgl_icon(bat_pct);
     lv_image_set_src(cb->bat_icon, bat_ico);
-    ui_style_img_recolor(cb->bat_icon, bat_clr);
-    lv_obj_set_style_text_color(cb->bat_text, bat_clr, 0);
+    apply_row_style(cb->bat_bg, cb->bat_icon, cb->bat_text, bat_level(bat_pct));
     lv_label_set_text_fmt(cb->bat_text, "%d%%", bat_pct);
 }
 
