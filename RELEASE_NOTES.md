@@ -1,9 +1,12 @@
 # Release Notes
 
-## DJI-Remote v1.3.0 (in preparation)
+## DJI-Remote v1.3.0
 
-Stability release: each camera connection is handled independently, so one
-camera with a problem no longer affects the others or the remote.
+Stability and usability release: each camera connection is handled
+independently, so one camera with a problem no longer affects the others or
+the remote. The camera selection can be configured, and low SD card and
+battery values are easier to see. This release also contains the Waveshare
+housing adaptation that was prepared as v1.2.1 (see below).
 
 ### What's New in v1.3.0
 
@@ -34,13 +37,25 @@ camera with a problem no longer affects the others or the remote.
 - **Long press: record on one camera** — On the main screen, holding Button
   A, B or C for 1 s starts or stops recording on camera 1, 2 or 3 (or
   wakes it for a snapshot) without changing the selection. Ideal for
-  controlling a single camera while All Cameras is selected. Because of
-  this, short presses on the main screen now react when the button is
-  released.
+  controlling a single camera while several cameras are selected. A paired
+  camera that is not connected is connected instead. Because of this, short
+  presses on the main screen now react when the button is released.
 - **Busy indicator (Waveshare)** — A cyan icon on the camera's block (and in
   its Options menu) shows that an action is running: connect, start/stop
   recording, photo, sleep, wake, snapshot, disconnect, unpair. It disappears
   when the camera shows the result, on an error, or after 10 s at the latest.
+- **Configurable camera selection (Slots)** — Button B cycles through four
+  entries that you can set up yourself under **Slots** (Options Menu, or
+  Button B during the boot scan). Each entry is one camera, a combination
+  such as **Slot 1 + 3**, or Empty. The factory cycle Slot 1 → Slot 2 →
+  Slot 3 → Slot 1 + 2 + 3 matches the previous behavior; "All Cameras" is
+  now the entry **Slot 1 + 2 + 3**. Multi-camera actions only affect the
+  cameras of the selected entry. The cycle is kept after a restart.
+- **Low SD card and battery: colored row** — When the free SD card space or
+  the battery level gets low, the whole row turns yellow (16 GB / 25 % or
+  less) or red (6 GB / 10 % or less) instead of only the text, so it is
+  visible at a glance.
+- **New GPS icon** — The GPS status is shown as a map pin.
 
 ### Update Notes
 
@@ -48,9 +63,9 @@ camera with a problem no longer affects the others or the remote.
   merged binary updates the partition table automatically. **Pairing data is
   kept.**
 
-## DJI-Remote v1.2.1
+## DJI-Remote v1.2.1 (not released separately, included in v1.3.0)
 
-Maintenance release for the Waveshare ESP32-S3-LCD-1.9 target. The 320x170 UI
+Maintenance update for the Waveshare ESP32-S3-LCD-1.9 target. The 320x170 UI
 preset was adapted to the physical button positions of the 3D-printed housing.
 Submenu navigation was unified on all targets.
 
@@ -99,8 +114,8 @@ Flash via [espflash.app](https://espflash.app) (Chrome or Edge required).
 Download the binary for your hardware target from the
 [latest release](https://github.com/rhoenschrat/DJI-Remote/releases/latest):
 
-- `dji-remote-v1.2.1-m5stack-basic-v27.bin` — M5Stack Basic V2.7
-- `dji-remote-v1.2.1-waveshare-s3-lcd19.bin` — Waveshare ESP32-S3-LCD-1.9
+- `dji-remote-v1.3.0-m5stack-basic-v27.bin` — M5Stack Basic V2.7
+- `dji-remote-v1.3.0-waveshare-s3-lcd19.bin` — Waveshare ESP32-S3-LCD-1.9
 
 ### Flash Settings — M5Stack Basic V2.7
 
