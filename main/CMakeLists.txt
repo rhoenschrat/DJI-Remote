@@ -1,10 +1,15 @@
 set(SRCS "app_main.c"
          "ui.c"
+         "button_sm.c"
+         "button_input.c"
+         "slot_busy.c"
+         "slot_cycle.c"
          "ui_layout.c"
          "ui_screen_main.c"
          "ui_screen_pairing.c"
          "ui_screen_settings.c"
          "ui_screen_mode_switch.c"
+         "ui_screen_slots.c"
          "icons.c"
          "lvgl_icons.c"
          "../utils/crc/custom_crc16.c"
@@ -36,7 +41,7 @@ elseif(CONFIG_BOARD_WAVESHARE_S3_LCD19)
 endif()
 
 idf_component_register(SRCS ${SRCS}
-                    PRIV_REQUIRES bt nvs_flash esp_app_format esp_driver_gpio led_strip esp_driver_spi esp_lcd driver esp_lvgl_port
+                    PRIV_REQUIRES bt nvs_flash esp_timer esp_app_format esp_driver_gpio led_strip esp_driver_spi esp_lcd driver esp_lvgl_port
                     INCLUDE_DIRS "." "../utils/crc" "../protocol" "../ble" "../data" "../logic" "../gps" "../diag" "../")
 
 # Board compile-time define — driven by Kconfig

@@ -2,7 +2,7 @@
  * Camera Settings Screen module (LVGL).
  *
  * Displays a submenu with per-camera actions (Mode Switch, Sleep/Wake,
- * Connect/Disconnect, Pair/Unpair). Button A selects, Button B moves to the
+ * Connect/Disconnect, Pair/Unpair) and the global Slots configuration. Button A selects, Button B moves to the
  * next entry, Button C returns to the main screen (handled in ui.c).
  * Layout positions come from ui_layout_get() for multi-resolution support.
  */
@@ -11,6 +11,7 @@
 #include "ui.h"
 #include "ui_layout.h"
 #include "lvgl_icons.h"
+#include "slot_busy.h"
 #include "esp_log.h"
 #include <string.h>
 
@@ -46,6 +47,12 @@ static btn_widget_t    s_btn_a;
 static btn_widget_t    s_btn_b;
 static btn_widget_t    s_btn_c;
 static int             s_selection_index = 0;
+/* Busy indicator of s_camera_index (plan 0017) and the timer that keeps it
+ * in sync while the main task blocks; NULL where the layout has none */
+static lv_obj_t       *s_busy_icon    = NULL;
+static lv_timer_t     *s_busy_timer   = NULL;
+
+#define BUSY_TIMER_PERIOD_MS 100
 
 /* ======================================================================
  * Widget Creation
@@ -115,6 +122,26 @@ static void create_button(btn_widget_t *b, int btn_idx,
     lv_label_set_text(b->label, lbl);
 }
 
+static void sync_busy_icon(void) {
+    if (s_busy_icon != NULL) {
+        ui_set_visible(s_busy_icon, slot_busy_is_active(s_camera_index));
+    }
+}
+
+/* LVGL task context: no extra lock needed */
+static void busy_timer_cb(lv_timer_t *t) {
+    (void)t;
+    sync_busy_icon();
+}
+
+static void delete_busy_widgets(void) {
+    if (s_busy_timer != NULL) {
+        lv_timer_delete(s_busy_timer);
+        s_busy_timer = NULL;
+    }
+    s_busy_icon = NULL;     /* child of s_screen, deleted with it */
+}
+
 /* ======================================================================
  * Public API
  * ====================================================================== */
@@ -123,6 +150,7 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     const ui_layout_t *L = ui_layout_get();
 
     if (s_screen != NULL) {
+        delete_busy_widgets();
         lv_obj_delete(s_screen);
         s_screen = NULL;
     }
@@ -162,6 +190,13 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     lv_image_set_src(s_entries[SETTINGS_ITEM_MODE_SWITCH].icon, &lvgl_switch_icon);
     lv_label_set_text(s_entries[SETTINGS_ITEM_MODE_SWITCH].label, "Mode Switch");
 
+    /* Static entry: Slots (global configuration, independent of this slot).
+     * Not shown where the preset has fewer entries (240x135). */
+    if (s_entry_count > SETTINGS_ITEM_SLOTS) {
+        lv_image_set_src(s_entries[SETTINGS_ITEM_SLOTS].icon, &lvgl_slots_icon);
+        lv_label_set_text(s_entries[SETTINGS_ITEM_SLOTS].label, "Slots");
+    }
+
     /* Notification area — omitted on 320x170 (no space) */
     if (L->submenu.notif_w > 0) {
         s_notification = lv_label_create(s_screen);
@@ -179,6 +214,19 @@ lv_obj_t *ui_screen_settings_create(int camera_index) {
     create_button(&s_btn_a, 0, &lvgl_select_icon, "Select");
     create_button(&s_btn_b, 1, &lvgl_next_icon, "Next");
     create_button(&s_btn_c, 2, &lvgl_back_icon, "Back");
+
+    /* Busy indicator in the empty bottom-left slot (the GPS icon position of
+     * the main screen); hidden until an action on this slot is running */
+    if (L->busy.enabled) {
+        s_busy_icon = lv_image_create(s_screen);
+        lv_obj_set_pos(s_busy_icon, L->busy.menu_x, L->busy.menu_y);
+        lv_image_set_src(s_busy_icon,
+                         L->busy.menu_size >= 32 ? &lvgl_busy_icon_32 : &lvgl_busy_icon_24);
+        ui_style_img_recolor(s_busy_icon, ui_clr_cyan());
+        lv_obj_clear_flag(s_busy_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_add_flag(s_busy_icon, LV_OBJ_FLAG_HIDDEN);
+        s_busy_timer = lv_timer_create(busy_timer_cb, BUSY_TIMER_PERIOD_MS, NULL);
+    }
 
     /* Initial dynamic update */
     ui_screen_settings_update();
@@ -239,10 +287,13 @@ void ui_screen_settings_update(void) {
         lv_obj_set_style_bg_color(s_entries[i].indicator,
                                    selected ? ui_clr_red() : ui_clr_black(), 0);
     }
+
+    sync_busy_icon();
 }
 
 void ui_screen_settings_destroy(void) {
     if (s_screen != NULL) {
+        delete_busy_widgets();
         lv_obj_delete(s_screen);
         s_screen = NULL;
         s_title = NULL;

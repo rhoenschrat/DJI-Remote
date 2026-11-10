@@ -6,7 +6,6 @@
  * 
  * - Display management and screen rendering
  * - Button-based navigation and function execution
- * - GPIO trigger system for external hardware integration
  * - Camera pairing and connection state management
  * - Persistent storage of camera information using NVS
  * - Device ID generation and management
@@ -19,13 +18,8 @@
  * 4. Sleep - Put camera into sleep mode
  * 5. Wake - Wake camera from sleep using BLE broadcast
  * 
- * GPIO Integration:
- * - G0 (pull LOW): Trigger shutter function
- * - G26 (pull HIGH): Trigger sleep function
- * - G25 (pull HIGH): Trigger wake function
- * 
- * All GPIO triggers include device ID-based randomized delays (1-100ms)
- * to prevent interference when multiple devices are used simultaneously.
+ * Button input: button_input.c samples all internal and external buttons
+ * and calls ui_handle_button_event() with CLICK/LONG events (ADR-024).
  * 
  * Hardware: M5Stack Basic V2.7 (ESP32, 320x240 TFT LCD)
  * Framework: ESP-IDF v5.5 with FreeRTOS
@@ -50,16 +44,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "esp_random.h"
-#include "driver/gpio.h"
-#include "freertos/queue.h"
 #include "esp_lvgl_port.h"
 #include "ui_layout.h"
+#include "button_input.h"
+#include "slot_busy.h"
+#include "slot_cycle.h"
 
 /* Logging tag for ESP_LOG functions */
 #define TAG "UI"
 
 /* Multi-camera support constant */
 #define NUM_CAMERAS 3
+
+_Static_assert(SLOT_CYCLE_NUM_SLOTS == NUM_CAMERAS,
+               "slot cycle masks must cover every camera slot");
 
 /* NVS (Non-Volatile Storage) configuration for persistent data */
 #define NVS_CAMERA_NAMESPACE "camera"      /* Namespace for camera pairing data */
@@ -68,55 +66,6 @@
 #define NVS_DEVICE_ID_KEY "device_id"      /* Key for unique device identifier */
 
 /* Old layout constants removed in Phase 6 -- layout is now in LVGL screen modules. */
-
-/* GPIO pin definitions for external hardware triggers
- * These pins allow external devices to trigger camera functions
- * with randomized delays based on the device's unique ID
- */
-#define GPIO_SHUTTER_PIN    26  /* G26 - Pull LOW to trigger SHUTTER (photo/video) */
-#define GPIO_BUTTON_B_PIN   21  /* G21 - External Button B, Pull LOW to trigger (navigation/selection) */
-#define GPIO_BUTTON_C_PIN   22  /* G22 - External Button C, Pull LOW to trigger (context/enter sub-screens) */
-#define GPIO_SLEEP_PIN     26   /* G26 - Pull HIGH to trigger SLEEP mode */
-#define GPIO_WAKE_PIN      25   /* G25 - Pull HIGH to trigger WAKE from sleep */
-
-/* External Buttons Feature Flag
- * 
- * UI_ENABLE_EXTERNAL_BUTTONS: Compile-time flag to enable/disable external button support
- * 
- * When set to 1:
- *   - External GPIO buttons A/B/C are fully supported (GPIO26, GPIO21, GPIO22)
- *   - User must provide correct hardware wiring, including appropriate pull-up resistors
- *   - GPIO pins are configured as inputs with interrupts
- *   - External button events are processed and routed to UI handlers
- * 
- * When set to 0:
- *   - External buttons are completely disabled
- *   - Firmware never touches GPIO26, GPIO21, or GPIO22
- *   - No GPIO configuration or ISR handlers for external pins
- *   - No external button events are generated or processed
- *   - Internal buttons (GPIO39/38/37) remain fully functional
- * 
- * Default: 1 (external buttons enabled)
- */
-#if defined(CONFIG_BOARD_WAVESHARE_S3_LCD19)
-/* Waveshare ESP32-S3 has no external button header; GPIOs 22/25 do not exist
- * on this chip (used internally for SPI flash/PSRAM interface). */
-#define UI_ENABLE_EXTERNAL_BUTTONS 0
-#else
-#define UI_ENABLE_EXTERNAL_BUTTONS 1
-#endif
-
-/* Enumeration of GPIO trigger types for external hardware integration
- * These correspond to the three main camera functions that can be
- * triggered via GPIO pins with randomized delays
- */
-typedef enum {
-    GPIO_TRIGGER_SHUTTER = 0,    /* Photo capture or video recording toggle */
-    GPIO_TRIGGER_BUTTON_B,       /* Cycle camera selection (mirrors internal Button B) */
-    GPIO_TRIGGER_BUTTON_C,       /* Context/enter sub-screens (mirrors internal Button C) */
-    GPIO_TRIGGER_SLEEP,          /* Put camera into sleep mode */
-    GPIO_TRIGGER_WAKE            /* Wake camera from sleep mode */
-} gpio_trigger_type_t;
 
 /* Legacy structure - kept for backward compatibility */
 typedef struct {
@@ -161,16 +110,14 @@ ui_state_t g_ui_state = {
     .display_needs_update = true,        /* Force initial display update */
 };
 
-/* camera_selection_t is defined in ui.h */
-
 /* Main screen state tracking */
 static bool g_main_screen_initialized = false;
+
+static bool wake_queue_contains(int slot);
 
 /* GPS display state tracking (for independent updates) */
 static bool g_last_displayed_gps_fix = false;  // Last displayed GPS fix state
 static char g_last_displayed_gps_text[24] = "";  // Last displayed GPS coordinates text
-camera_selection_t g_camera_selection = CAMERA_SELECT_0;
-static camera_selection_t g_prev_camera_selection = CAMERA_SELECT_0;
 
 /* Pairing screen state */
 #define MAX_DISCOVERED_CAMERAS 10
@@ -192,6 +139,9 @@ static int g_settings_active_camera_index = 0;
 
 /* Mode Switch Screen state (slot index used by ui_switch_screen) */
 static int g_mode_switch_camera_index = 0;
+
+/* Slots configuration: cycle entry edited by / returned to (plan 0018) */
+static int g_slots_entry_pos = 0;
 
 /* Slot whose Button A "Connect" hit an unresponsive link (ADR-019); handled
  * after the LVGL lock is released: teardown, wait for release, reconnect */
@@ -221,6 +171,40 @@ static void post_submit_feedback(esp_err_t ret, const char *ok_msg, uint16_t ok_
     }
 }
 
+/* Busy indicator kinds for the shutter jobs (plan 0017). A photo leaves no
+ * lasting camera state, so it ends with its job instead of on a status. */
+static slot_busy_kind_t shutter_busy_kind(int slot, cmd_job_t job) {
+    switch (job) {
+        case CMD_JOB_RECORD_START:
+        case CMD_JOB_RECORD_START_ASYNC:
+            return (g_camera_states[slot].camera_mode == CAMERA_MODE_PHOTO)
+                       ? SLOT_BUSY_PHOTO : SLOT_BUSY_REC_START;
+        case CMD_JOB_RECORD_STOP:
+        case CMD_JOB_RECORD_STOP_ASYNC:
+            return SLOT_BUSY_REC_STOP;
+        case CMD_JOB_SLEEP:
+            return SLOT_BUSY_SLEEP;
+        default:
+            return SLOT_BUSY_NONE;   /* highlight, QS: no indicator */
+    }
+}
+
+/* Submit a job and, if it was accepted, start the slot's busy indicator.
+ * A rejected job ("Busy", not connected) never shows one. */
+static esp_err_t ui_submit_job_busy(int slot, cmd_job_t job, bool announce) {
+    slot_busy_kind_t kind = shutter_busy_kind(slot, job);
+    esp_err_t ret = ui_submit_job(slot, job, announce);
+    if (ret == ESP_OK && kind != SLOT_BUSY_NONE) {
+        slot_busy_begin(slot, kind);
+    }
+    return ret;
+}
+
+/* Kinds a failed wake attempt ends (broadcast error, retries exhausted) */
+#define SLOT_BUSY_WAKE_KINDS (SLOT_BUSY_BIT(SLOT_BUSY_WAKE) | SLOT_BUSY_BIT(SLOT_BUSY_SNAPSHOT))
+/* Kinds a failed connect ends */
+#define SLOT_BUSY_CONNECT_KINDS SLOT_BUSY_BIT(SLOT_BUSY_CONNECT)
+
 /* Wake-up queue for serialized wake broadcasts in "All Cameras" mode */
 wake_queue_t g_wake_queue = {0};
 wake_queue_state_t g_wake_queue_state = WAKE_QUEUE_IDLE;
@@ -241,8 +225,8 @@ uint32_t g_wake_broadcast_start_time_ms = 0;  // Timestamp when current broadcas
  * @brief Generate a unique random device identifier
  * 
  * Creates a 32-bit random device ID using ESP32's hardware random number
- * generator. This ID is used for DJI protocol communication and GPIO
- * trigger delay calculation to prevent interference between multiple devices.
+ * generator. This ID identifies the remote in the DJI protocol
+ * (connection request / pairing).
  * 
  * @return 32-bit random device identifier (never zero)
  */
@@ -263,8 +247,8 @@ static uint32_t generate_random_device_id(void) {
  * @brief Save device ID to non-volatile storage for persistence
  * 
  * Stores the device's unique identifier to NVS so it remains consistent
- * across power cycles and reboots. This ensures GPIO trigger delays and
- * protocol communication remain stable.
+ * across power cycles and reboots, so paired cameras keep recognising the
+ * remote.
  * 
  * @param device_id The 32-bit device identifier to save
  * @return ESP_OK on success, ESP_ERR_* on failure
@@ -331,10 +315,8 @@ static esp_err_t load_device_id_from_nvs(uint32_t* device_id) {
  * @brief Initialize device ID on system startup
  * 
  * Handles device ID initialization by either loading an existing ID from NVS
- * or generating a new random ID on first boot. The device ID is used for:
- * - DJI protocol communication
- * - GPIO trigger delay calculation
- * - Multi-device interference prevention
+ * or generating a new random ID on first boot. The device ID identifies the
+ * remote in the DJI protocol (connection request / pairing).
  */
 static void initialize_device_id(void) {
     uint32_t stored_device_id;
@@ -364,371 +346,6 @@ static void initialize_device_id(void) {
     }
     
     ESP_LOGI(TAG, "Device ID initialization complete, final g_device_id: 0x%08X", (unsigned int)g_device_id);
-}
-
-/* GPIO control system components for external hardware integration
- * Implements thread-safe GPIO trigger processing with debouncing and delays
- */
-static QueueHandle_t gpio_trigger_queue = NULL;                              /* FreeRTOS queue for GPIO events */
-static TickType_t last_gpio_trigger[3] = {0, 0, 0};                         /* Per-pin debouncing timestamps */
-static TickType_t last_global_gpio_trigger = 0;                             /* Global cooldown timestamp */
-static volatile gpio_trigger_type_t pending_gpio_action = (gpio_trigger_type_t)-1; /* Pending action for main thread */
-
-/**
- * @brief Calculate device-specific GPIO trigger delay
- * 
- * Generates a consistent but pseudo-random delay (1-100ms) based on the device's
- * unique ID. This prevents multiple devices from triggering simultaneously when
- * connected to the same external trigger source, reducing RF interference and
- * improving reliability in multi-device deployments.
- * 
- * @return Delay in milliseconds (1-100ms range)
- */
-static uint32_t calculate_gpio_delay_ms(void) {
-    /* Safety check: ensure device ID is initialized */
-    if (g_device_id == 0) {
-        ESP_LOGW(TAG, "Device ID not initialized, using default 50ms delay");
-        return 50;
-    }
-    
-    /* Use lower 16 bits of device ID as entropy source for consistent randomization */
-    uint16_t id_hash = (uint16_t)(g_device_id & 0xFFFF);
-    
-    /* Map 16-bit hash (0-65535) to delay range (1-100ms) with minimum 1ms guarantee */
-    uint32_t delay_ms = 1 + ((id_hash * 99) / 65535);
-    
-    ESP_LOGI(TAG, "GPIO trigger delay calculated: %lu ms (based on device ID 0x%08X)", 
-             delay_ms, (unsigned int)g_device_id);
-    
-    return delay_ms;
-}
-
-/* GPIO debouncing and cooldown configuration
- * Aggressive timing to prevent multiple triggers from mechanical switch bounce
- * and to ensure stable operation with external hardware
- */
-#define GPIO_DEBOUNCE_TIME_MS 1000      /* Per-pin debouncing period (1 second) */
-#define GPIO_GLOBAL_COOLDOWN_MS 1000    /* Global cooldown between any GPIO triggers (1 second) */
-
-/**
- * @brief GPIO interrupt service routine
- * 
- * Handles GPIO pin state changes by queuing trigger events for processing
- * in the main task context. The ISR must be kept minimal and fast, so all
- * actual processing is deferred to the GPIO monitor task.
- * 
- * @param arg Pointer to gpio_trigger_type_t indicating which trigger type
- */
-#if UI_ENABLE_EXTERNAL_BUTTONS
-static void IRAM_ATTR gpio_isr_handler(void* arg) {
-    gpio_trigger_type_t trigger_type = (gpio_trigger_type_t)(uintptr_t)arg;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    
-    // Send trigger type to queue for processing in main task
-    xQueueSendFromISR(gpio_trigger_queue, &trigger_type, &xHigherPriorityTaskWoken);
-    
-    if (xHigherPriorityTaskWoken) {
-        portYIELD_FROM_ISR();
-    }
-}
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-
-/**
- * @brief Process GPIO trigger with debouncing and delay calculation
- * 
- * Implements comprehensive GPIO trigger processing including:
- * - Per-pin and global debouncing to prevent multiple triggers
- * - Device ID-based delay calculation for multi-device coordination
- * - Thread-safe pending action system for main thread execution
- * 
- * @param trigger_type Type of GPIO trigger to process
- */
-static void process_gpio_trigger(gpio_trigger_type_t trigger_type) {
-    TickType_t current_time = xTaskGetTickCount();
-    TickType_t debounce_ticks = pdMS_TO_TICKS(GPIO_DEBOUNCE_TIME_MS);
-    TickType_t global_cooldown_ticks = pdMS_TO_TICKS(GPIO_GLOBAL_COOLDOWN_MS);
-    
-    // Check for global cooldown (any GPIO trigger within 1 second)
-    if ((current_time - last_global_gpio_trigger) < global_cooldown_ticks) {
-        ESP_LOGW(TAG, "GPIO trigger %d ignored due to global cooldown", trigger_type);
-        return;
-    }
-    
-    // Check for per-pin debouncing
-    if (trigger_type < 3 && (current_time - last_gpio_trigger[trigger_type]) < debounce_ticks) {
-        ESP_LOGW(TAG, "GPIO trigger %d ignored due to pin debouncing", trigger_type);
-        return;
-    }
-    
-    // Check if there's already a pending action
-    if (pending_gpio_action != (gpio_trigger_type_t)-1) {
-        ESP_LOGW(TAG, "GPIO trigger %d ignored, action already pending", trigger_type);
-        return;
-    }
-    
-    // Update timestamps
-    last_global_gpio_trigger = current_time;
-    if (trigger_type < 3) {
-        last_gpio_trigger[trigger_type] = current_time;
-    }
-    
-    uint32_t delay_ms = calculate_gpio_delay_ms();
-    
-    ESP_LOGI(TAG, "GPIO trigger %d processing, delaying %lu ms", trigger_type, delay_ms);
-    
-    // Wait for the calculated delay
-    vTaskDelay(pdMS_TO_TICKS(delay_ms));
-    
-    // Set the pending action for main thread to execute
-    pending_gpio_action = trigger_type;
-    ESP_LOGI(TAG, "GPIO trigger %d ready for execution by main thread", trigger_type);
-}
-
-/**
- * @brief GPIO monitoring task - processes queued GPIO events
- * 
- * FreeRTOS task that receives GPIO trigger events from the ISR queue
- * and processes them with appropriate delays and debouncing. Runs
- * continuously waiting for events.
- * 
- * @param pvParameters Unused task parameter (required by FreeRTOS)
- */
-static void gpio_monitor_task(void* pvParameters) {
-    gpio_trigger_type_t trigger_type;
-    
-    while (1) {
-        if (xQueueReceive(gpio_trigger_queue, &trigger_type, portMAX_DELAY)) {
-            process_gpio_trigger(trigger_type);
-        }
-    }
-}
-
-/**
- * @brief Initialize the complete GPIO trigger system
- * 
- * Sets up GPIO pins, interrupt handlers, debouncing system, and monitoring task.
- * Configures:
- * - G0 (SHUTTER): Input with pull-up, trigger on falling edge (pull to LOW)
- * - G26 (SLEEP): Input with pull-down, trigger on rising edge (pull to HIGH)
- * - G25 (WAKE): Input with pull-down, trigger on rising edge (pull to HIGH)
- * 
- * @return ESP_OK on success, ESP_ERR_* on failure
- */
-static esp_err_t init_gpio_system(void) {
-    esp_err_t ret = ESP_OK;
-    
-    ESP_LOGI(TAG, "Initializing GPIO trigger system");
-    ESP_LOGI(TAG, "Current device ID: 0x%08X", (unsigned int)g_device_id);
-    
-    /* Create FreeRTOS queue for GPIO trigger events (ISR to task communication) */
-    gpio_trigger_queue = xQueueCreate(10, sizeof(gpio_trigger_type_t));
-    if (gpio_trigger_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create GPIO trigger queue");
-        return ESP_FAIL;
-    }
-    
-    /* Initialize debouncing timestamps and pending action state */
-    for (int i = 0; i < 3; i++) {
-        last_gpio_trigger[i] = 0;
-    }
-    last_global_gpio_trigger = 0;
-    pending_gpio_action = (gpio_trigger_type_t)-1;
-    
-    /* Configure GPIO pins with appropriate pull resistors and interrupt types */
-#if UI_ENABLE_EXTERNAL_BUTTONS
-    gpio_config_t io_conf = {};
-    /* G26 (SHUTTER) - Input with internal pull-up resistor
-     * External circuit should pull pin LOW to trigger shutter function
-     */
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;      /* Interrupt on falling edge (HIGH to LOW) */
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_SHUTTER_PIN);
-    io_conf.pull_down_en = 0;
-    io_conf.pull_up_en = 1;
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure SHUTTER GPIO pin");
-        return ret;
-    }
-    
-    /* G21 (BUTTON_B) - External Button B, input with internal pull-up.
-     * External circuit: 10k pull-up to 3.3V, button from G21 to GND.
-     * Press = LOW, so we use falling-edge interrupt.
-     */
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;       // interrupt on falling edge (HIGH -> LOW)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_BUTTON_B_PIN);
-    io_conf.pull_down_en = 0;                    // no internal pulldown
-    io_conf.pull_up_en = 1;                      // internal pull-up enabled in addition to external 10k
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure BUTTON_B GPIO pin");
-        return ret;
-    }
-    
-    /* G22 (BUTTON_C) - External Button C, input with NO internal pull-up/pull-down.
-     * External circuit: 10k pull-up to 3.3V, button from G22 to GND.
-     * Press = LOW, so we use falling-edge interrupt.
-     * Idle level is HIGH (external pull-up), press drives pin LOW.
-     */
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;       // interrupt on falling edge (HIGH -> LOW)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_BUTTON_C_PIN);
-    io_conf.pull_down_en = 0;                    // no internal pulldown
-    io_conf.pull_up_en = 0;                      // no internal pull-up (external 10k provides pull-up)
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure BUTTON_C GPIO pin");
-        return ret;
-    }
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-    
-    /* G26 (SLEEP) - Input with internal pull-down resistor
-     * External circuit should pull pin HIGH to trigger sleep function
-     * DISABLED: External sleep/wake GPIO triggers are not used in this hardware configuration
-     */
-    /*
-    io_conf.intr_type = GPIO_INTR_POSEDGE;      // Interrupt on rising edge (LOW to HIGH)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_SLEEP_PIN);
-    io_conf.pull_down_en = 1;
-    io_conf.pull_up_en = 0;
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure SLEEP GPIO pin");
-        return ret;
-    }
-    */
-    
-    /* G25 (WAKE) - Input with internal pull-down resistor
-     * External circuit should pull pin HIGH to trigger wake function
-     * DISABLED: External sleep/wake GPIO triggers are not used in this hardware configuration
-     */
-    /*
-    io_conf.intr_type = GPIO_INTR_POSEDGE;      // Interrupt on rising edge (LOW to HIGH)
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << GPIO_WAKE_PIN);
-    io_conf.pull_down_en = 1;
-    io_conf.pull_up_en = 0;
-    ret = gpio_config(&io_conf);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to configure WAKE GPIO pin");
-        return ret;
-    }
-    */
-    
-    /* Install GPIO interrupt service if not already installed */
-    ret = gpio_install_isr_service(0);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {  /* ESP_ERR_INVALID_STATE = already installed */
-        ESP_LOGE(TAG, "Failed to install GPIO ISR service");
-        return ret;
-    }
-    
-    /* Register interrupt handlers for each GPIO pin with trigger type identification */
-#if UI_ENABLE_EXTERNAL_BUTTONS
-    ret = gpio_isr_handler_add(GPIO_SHUTTER_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_SHUTTER);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add SHUTTER GPIO ISR handler");
-        return ret;
-    }
-    
-    ret = gpio_isr_handler_add(GPIO_BUTTON_B_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_BUTTON_B);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add BUTTON_B GPIO ISR handler");
-        return ret;
-    }
-    
-    ret = gpio_isr_handler_add(GPIO_BUTTON_C_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_BUTTON_C);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add BUTTON_C GPIO ISR handler");
-        return ret;
-    }
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-    
-    /* DISABLED: External sleep/wake GPIO triggers are not used in this hardware configuration */
-    /*
-    ret = gpio_isr_handler_add(GPIO_SLEEP_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_SLEEP);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add SLEEP GPIO ISR handler");
-        return ret;
-    }
-    
-    ret = gpio_isr_handler_add(GPIO_WAKE_PIN, gpio_isr_handler, (void*)GPIO_TRIGGER_WAKE);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add WAKE GPIO ISR handler");
-        return ret;
-    }
-    */
-    
-    /* Create FreeRTOS task for GPIO event processing with sufficient stack size */
-    BaseType_t task_ret = xTaskCreate(gpio_monitor_task, "gpio_monitor", 4096, NULL, 10, NULL);
-    if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create GPIO monitor task");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI(TAG, "GPIO trigger system initialized successfully");
-    
-#if UI_ENABLE_EXTERNAL_BUTTONS
-    ESP_LOGI(TAG, "External buttons: ENABLED (GPIO26/21/22 mapped to A/B/C)");
-    ESP_LOGI(TAG, "  G26 (Shutter): External Button A, falling-edge trigger, internal pull-up enabled, button to GND");
-    ESP_LOGI(TAG, "  G21 (Button B): External Button B, falling-edge trigger, internal pull-up enabled, external 10k pull-up to 3.3V, button to GND");
-    ESP_LOGI(TAG, "  G22 (Button C): External Button C, falling-edge trigger, external pull-up required");
-    ESP_LOGI(TAG, "External Button A: Routed through UI button dispatch (same as internal Button A)");
-#else
-    ESP_LOGI(TAG, "External buttons: DISABLED (no external GPIOs configured)");
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-    
-    return ESP_OK;
-}
-
-/**
- * @brief Process pending GPIO actions from main thread
- * 
- * This function must be called regularly from the main application loop
- * to execute GPIO-triggered actions in the main thread context. This
- * ensures thread safety by avoiding UI function calls from GPIO tasks.
- */
-void ui_process_pending_gpio_actions(void) {
-    if (pending_gpio_action != (gpio_trigger_type_t)-1) {
-        gpio_trigger_type_t action = pending_gpio_action;
-        pending_gpio_action = (gpio_trigger_type_t)-1; // Clear the pending action first
-        
-        ESP_LOGI(TAG, "Executing pending GPIO action: %d", action);
-        
-        switch (action) {
-#if UI_ENABLE_EXTERNAL_BUTTONS
-            case GPIO_TRIGGER_SHUTTER:
-                ui_handle_button_a();
-                break;
-                
-            case GPIO_TRIGGER_BUTTON_B:
-                ui_handle_button_b();
-                break;
-                
-            case GPIO_TRIGGER_BUTTON_C:
-                ui_handle_button_c();
-                break;
-#else
-            /* External button triggers are disabled - these cases should never be reached */
-            case GPIO_TRIGGER_SHUTTER:
-            case GPIO_TRIGGER_BUTTON_B:
-            case GPIO_TRIGGER_BUTTON_C:
-                ESP_LOGW(TAG, "External button trigger received but external buttons are disabled");
-                break;
-#endif /* UI_ENABLE_EXTERNAL_BUTTONS */
-                
-            case GPIO_TRIGGER_SLEEP:
-                ESP_LOGI(TAG, "SLEEP GPIO trigger - not implemented in single-screen mode");
-                // Sleep command logic can be added here if needed
-                break;
-                
-            case GPIO_TRIGGER_WAKE:
-                ESP_LOGI(TAG, "WAKE GPIO trigger - not implemented in single-screen mode");
-                // Wake command logic can be added here if needed
-                break;
-        }
-    }
 }
 
 /**
@@ -967,6 +584,7 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
     // Update camera slot UI immediately to show "connecting" state
     g_camera_states[camera_index].connection_state = CAM_STATE_CONNECTING;
     g_ui_state.display_needs_update = true;
+    slot_busy_begin(camera_index, SLOT_BUSY_CONNECT);
     
     // Skip intermediate UI updates when on Settings Screen or Pairing Screen to avoid full redraws
     // Both screens have their own notification areas for progress
@@ -1047,6 +665,7 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
                 ui_show_shutter_bottom_message("Protocol Failed", M5_COLOR_RED, 1500);
             }
             connect_logic_reset_slot_link_state(camera_index);
+            slot_busy_clear_kinds(camera_index, SLOT_BUSY_CONNECT_KINDS);
 
             // Remove from wake queue if present
             if (g_current_wake_camera_index == camera_index) {
@@ -1069,6 +688,7 @@ static int ui_perform_complete_reconnection(int camera_index, bool show_messages
             ui_show_shutter_bottom_message("BLE Failed", M5_COLOR_RED, 1500);
         }
         connect_logic_reset_slot_link_state(camera_index);
+        slot_busy_clear_kinds(camera_index, SLOT_BUSY_CONNECT_KINDS);
 
         // Remove from wake queue if present
         if (g_current_wake_camera_index == camera_index) {
@@ -1118,6 +738,7 @@ static int ui_perform_boot_scan_connection(int camera_index) {
     // Update camera slot UI immediately to show "connecting" state
     g_camera_states[camera_index].connection_state = CAM_STATE_CONNECTING;
     g_ui_state.display_needs_update = true;
+    slot_busy_begin(camera_index, SLOT_BUSY_CONNECT);
     
     // Force immediate UI update so user sees "connecting" state right away
     ui_update_display();
@@ -1174,6 +795,7 @@ static int ui_perform_boot_scan_connection(int camera_index) {
         } else {
             // Protocol connection failed - reset state
             connect_logic_reset_slot_link_state(camera_index);
+            slot_busy_clear_kinds(camera_index, SLOT_BUSY_CONNECT_KINDS);
 
             g_ui_state.display_needs_update = true;
             ui_update_display();
@@ -1183,6 +805,7 @@ static int ui_perform_boot_scan_connection(int camera_index) {
     } else {
         // BLE connection failed - reset state
         connect_logic_reset_slot_link_state(camera_index);
+        slot_busy_clear_kinds(camera_index, SLOT_BUSY_CONNECT_KINDS);
 
         g_ui_state.display_needs_update = true;
         ui_update_display();
@@ -1273,6 +896,7 @@ void ui_auto_connect_on_startup(void) {
 }
 
 static void ui_detect_device_and_set_scale(void);
+static void ui_slot_shutter_action(int cam_idx, bool wake_via_queue);
 
 /**
  * @brief Initialize the complete user interface system
@@ -1284,7 +908,6 @@ static void ui_detect_device_and_set_scale(void);
  * - Data layer initialization
  * - Display configuration
  * - Automatic connection attempts
- * - GPIO trigger system setup
  */
 void ui_early_init(void) {
     ESP_LOGI(TAG, "UI early init: NVS, pairings, data layer, boot scan");
@@ -1354,17 +977,21 @@ void ui_init(void) {
 
     /* Configure display scaling and layout for detected hardware */
     ui_detect_device_and_set_scale();
+
+    /* Slot cycle before the first main screen draw: the selection indicator
+     * and button labels depend on it. NVS is up since ui_early_init(). */
+    slot_cycle_init();
+
     g_ui_state.current_screen = SCREEN_MAIN;
     g_ui_state.display_needs_update = true;
 
     /* Perform initial display update to show Main Screen */
     ui_update_display();
     
-    /* Initialize GPIO trigger system after all other subsystems are ready */
-    esp_err_t gpio_err = init_gpio_system();
-    if (gpio_err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize GPIO system: %s", esp_err_to_name(gpio_err));
-        ESP_LOGW(TAG, "Continuing without GPIO triggers");
+    /* External buttons (if enabled); internal buttons are set up by the HAL */
+    esp_err_t btn_err = button_input_init();
+    if (btn_err != ESP_OK) {
+        ESP_LOGW(TAG, "Continuing without external buttons: %s", esp_err_to_name(btn_err));
     }
     
     /* Initialize wake-up queue for serialized wake broadcasts */
@@ -1416,34 +1043,33 @@ const char* ui_get_camera_model_name(uint32_t device_id) {
 /* Old draw functions removed in Phase 6 -- see ui_screen_main.c, ui_screen_pairing.c,
  * ui_screen_settings.c, ui_screen_mode_switch.c for LVGL replacements. */
 
+
 /**
- * @brief Cycle camera selection to next state
- * 
- * Called when Button B is pressed. Cycles through Camera 0 → 1 → 2 → All → 0.
- * Updates only the selection frame borders, not camera content.
+ * @brief Whether Button B on the main screen opens the Slots configuration
+ *
+ * ADR-026: the cycle may consist of multi-slot entries only, which makes the
+ * Options Menu (and its "Slots" entry) unreachable. The configuration stays
+ * reachable through Button B "Slots" during the boot scan, which runs at
+ * every boot with at least one paired camera.
+ */
+bool ui_main_slots_shortcut_active(void) {
+    return connect_logic_is_boot_scan_active();
+}
+/**
+ * @brief Advance the Main Screen selection to the next cycle entry
+ *
+ * Called when Button B is pressed. Follows the configurable slot cycle
+ * (default 1 -> 2 -> 3 -> 1+2+3), skipping Empty entries (ADR-026).
  */
 void ui_cycle_camera_selection(void) {
-    // Save previous selection
-    g_prev_camera_selection = g_camera_selection;
-    
-    // Cycle to next selection
-    switch (g_camera_selection) {
-        case CAMERA_SELECT_0:
-            g_camera_selection = CAMERA_SELECT_1;
-            break;
-        case CAMERA_SELECT_1:
-            g_camera_selection = CAMERA_SELECT_2;
-            break;
-        case CAMERA_SELECT_2:
-            g_camera_selection = CAMERA_SELECT_ALL;
-            break;
-        case CAMERA_SELECT_ALL:
-            g_camera_selection = CAMERA_SELECT_0;
-            break;
-    }
-    
-    ESP_LOGI(TAG, "Camera selection changed: %d -> %d", g_prev_camera_selection, g_camera_selection);
-    
+    int prev_pos = slot_cycle_get_position();
+    int pos = slot_cycle_next();
+
+    char name[SLOT_CYCLE_NAME_LEN];
+    slot_cycle_format_name(slot_cycle_get_entry(pos), name, sizeof(name));
+    ESP_LOGI(TAG, "Camera selection changed: entry %d -> %d (%s)",
+             prev_pos + 1, pos + 1, name);
+
     // Trigger display update which will draw indicators with correct order
     g_ui_state.display_needs_update = true;
 }
@@ -1610,6 +1236,8 @@ static void ui_handle_pairing_screen_button_a(void) {
         }
 
         cam->connection_state = CAM_STATE_CONNECTING;
+        // Shown from now on, also during the blocking wait below (plan 0017)
+        slot_busy_begin(active_slot, SLOT_BUSY_CONNECT);
         g_pairing_scan_active = false;
         ble_stop_scan();
         g_discovered_camera_count = 0;
@@ -1710,6 +1338,10 @@ void ui_switch_screen(ui_screen_t screen) {
         case SCREEN_MODE_SWITCH:
             ui_screen_mode_switch_destroy();
             break;
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_screen_slots_destroy();
+            break;
         default:
             break;
     }
@@ -1729,6 +1361,12 @@ void ui_switch_screen(ui_screen_t screen) {
             break;
         case SCREEN_MODE_SWITCH:
             scr = ui_screen_mode_switch_create(g_mode_switch_camera_index);
+            break;
+        case SCREEN_SLOTS_CYCLE:
+            scr = ui_screen_slots_create(SLOTS_MODE_CYCLE, g_slots_entry_pos);
+            break;
+        case SCREEN_SLOTS_ENTRY:
+            scr = ui_screen_slots_create(SLOTS_MODE_ENTRY, g_slots_entry_pos);
             break;
         default:
             break;
@@ -1751,6 +1389,30 @@ static void ui_handle_mode_switch_button_a(void) {
 static void ui_handle_mode_switch_button_b(void) {
     /* Button B has no function on the Mode Switch screen (Back is Button C) */
     ESP_LOGD(TAG, "Mode Switch: Button B ignored");
+}
+
+/**
+ * @brief Button A on the Slots screens (plan 0018)
+ *
+ * Cycle list: open the entry screen for the highlighted entry.
+ * Entry screen: toggle the highlighted slot; a toggle that would leave every
+ * entry Empty is rejected and flashes the row red. Nothing is saved
+ * here: the cycle is persisted on Back from the cycle list.
+ */
+static void ui_handle_slots_screen_button_a(void) {
+    if (g_ui_state.current_screen == SCREEN_SLOTS_CYCLE) {
+        g_slots_entry_pos = ui_screen_slots_get_selection();
+        ui_switch_screen(SCREEN_SLOTS_ENTRY);
+        return;
+    }
+
+    int pos = ui_screen_slots_get_entry_pos();
+    int slot = ui_screen_slots_get_selection();
+    if (slot_cycle_toggle(pos, slot)) {
+        ui_screen_slots_update();
+    } else {
+        ui_screen_slots_flash_rejected();
+    }
 }
 
 /**
@@ -1789,6 +1451,9 @@ static void ui_handle_settings_screen_button_a(void) {
                 ui_screen_settings_set_notification("Waking up...", lv_color_make(0, 255, 255));
 
                 esp_err_t wake_result = connect_logic_start_wake_broadcast_for_slot(active_slot);
+                if (wake_result == ESP_OK) {
+                    slot_busy_begin(active_slot, SLOT_BUSY_WAKE);
+                }
                 if (wake_result != ESP_OK) {
                     ESP_LOGE(TAG, "Failed to start wake broadcast: %s", esp_err_to_name(wake_result));
                     ui_screen_settings_set_notification("Wake failed", lv_color_make(255, 0, 0));
@@ -1807,7 +1472,7 @@ static void ui_handle_settings_screen_button_a(void) {
             } else {
                 // Sleep runs on the slot's worker (ADR-020); a failure is
                 // announced on the main screen when the result arrives
-                esp_err_t sub = ui_submit_job(active_slot, CMD_JOB_SLEEP, true);
+                esp_err_t sub = ui_submit_job_busy(active_slot, CMD_JOB_SLEEP, true);
                 if (sub != ESP_OK) {
                     ui_screen_settings_set_notification(
                         sub == ESP_ERR_NOT_FINISHED ? "Busy" : "Not connected",
@@ -1835,6 +1500,7 @@ static void ui_handle_settings_screen_button_a(void) {
             if (cam->connection_state == CAM_STATE_CONNECTED) {
                 ESP_LOGI(TAG, "Settings: Disconnecting camera %d", active_slot);
                 ui_screen_settings_set_notification("Disconnecting...", lv_color_make(255, 255, 0));
+                slot_busy_begin(active_slot, SLOT_BUSY_DISCONNECT);
                 connect_logic_ble_disconnect(active_slot);
                 connect_logic_reset_slot_link_state(active_slot);
 
@@ -1851,11 +1517,15 @@ static void ui_handle_settings_screen_button_a(void) {
                 ui_screen_settings_set_notification("Reconnecting...", lv_color_make(0, 0, 255));
                 connect_logic_set_slot_connecting(active_slot, true);
                 cam->connection_state = CAM_STATE_CONNECTING;
+                // After the state change: UNRESPONSIVE would end it at once
+                slot_busy_begin(active_slot, SLOT_BUSY_CONNECT);
                 lvgl_port_unlock();
 
                 int result = -1;
                 if (connect_logic_teardown_and_wait(active_slot) == 0) {
                     result = ui_perform_complete_reconnection(active_slot, true);
+                } else {
+                    slot_busy_clear_kinds(active_slot, SLOT_BUSY_CONNECT_KINDS);
                 }
 
                 lvgl_port_lock(0);
@@ -1873,6 +1543,9 @@ static void ui_handle_settings_screen_button_a(void) {
             } else {
                 ESP_LOGI(TAG, "Settings: Connecting camera %d", active_slot);
                 ui_screen_settings_set_notification("Connecting...", lv_color_make(0, 0, 255));
+                // Before the blocking wait; ui_perform_complete_reconnection()
+                // restarts it and clears it on failure
+                slot_busy_begin(active_slot, SLOT_BUSY_CONNECT);
                 lvgl_port_unlock();
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 lvgl_port_lock(0);
@@ -1893,9 +1566,18 @@ static void ui_handle_settings_screen_button_a(void) {
             }
             break;
 
+        case SETTINGS_ITEM_SLOTS:
+            // Global configuration: available in every connection state and
+            // independent of the slot the Options Menu was opened for
+            ESP_LOGI(TAG, "Settings: Slots selected");
+            g_slots_entry_pos = slot_cycle_get_position();
+            ui_switch_screen(SCREEN_SLOTS_CYCLE);
+            break;
+
         case SETTINGS_ITEM_PAIR_UNPAIR:
             if (cam->is_paired) {
                 ESP_LOGI(TAG, "Settings: Unpairing camera %d", active_slot);
+                slot_busy_begin(active_slot, SLOT_BUSY_UNPAIR);
 
                 // Any open link (also an unresponsive one) is closed first
                 if (ble_is_camera_connected(active_slot)) {
@@ -1984,6 +1666,11 @@ void ui_update_display(void) {
             ui_screen_mode_switch_update();
             break;
 
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_screen_slots_update();
+            break;
+
         case SCREEN_MAIN:
         default: {
             if (!ui_screen_main_is_created()) {
@@ -2035,6 +1722,10 @@ void ui_handle_button_a(void) {
         case SCREEN_MODE_SWITCH:
             ui_handle_mode_switch_button_a();
             break;
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_handle_slots_screen_button_a();
+            break;
         default:
             break;
     }
@@ -2055,8 +1746,9 @@ void ui_handle_button_a(void) {
                      cam_idx, result == 0 ? "successful" : "failed");
         } else {
             ESP_LOGW(TAG, "Camera %d: link not released, reconnect aborted", cam_idx);
+            slot_busy_clear_kinds(cam_idx, SLOT_BUSY_CONNECT_KINDS);
             lvgl_port_lock(0);
-            ui_show_shutter_bottom_message("Reconnect failed", M5_COLOR_RED, 1500);
+            ui_post_shutter_message("Reconnect failed", M5_COLOR_RED, 1500);
             lvgl_port_unlock();
         }
         lvgl_port_lock(0);
@@ -2067,10 +1759,11 @@ void ui_handle_button_a(void) {
 
     // Deferred reconnection: runs outside the LVGL lock so the display
     // can refresh to show "connecting" state during the blocking BLE call.
+    // Single-slot selections only; multi-slot entries never schedule one.
     if (g_ui_state.current_screen == SCREEN_MAIN &&
-        g_camera_selection != CAMERA_SELECT_ALL) {
-        int cam_idx = (int)g_camera_selection;
-        if (cam_idx >= 0 && cam_idx < NUM_CAMERAS &&
+        slot_cycle_selected_single() >= 0) {
+        int cam_idx = slot_cycle_selected_single();
+        if (cam_idx < NUM_CAMERAS &&
             g_camera_states[cam_idx].connection_state == CAM_STATE_CONNECTING &&
             !g_camera_states[cam_idx].is_connected) {
             int result = ui_perform_complete_reconnection(cam_idx, true);
@@ -2093,7 +1786,14 @@ void ui_handle_button_b(void) {
     lvgl_port_lock(0);
     switch (g_ui_state.current_screen) {
         case SCREEN_MAIN:
-            ui_cycle_camera_selection();
+            if (ui_main_slots_shortcut_active()) {
+                // Slots shortcut (ADR-026); the boot scan keeps running
+                ESP_LOGI(TAG, "Main: Slots (Button B), opening slot cycle configuration");
+                g_slots_entry_pos = slot_cycle_get_position();
+                ui_switch_screen(SCREEN_SLOTS_CYCLE);
+            } else {
+                ui_cycle_camera_selection();
+            }
             break;
         case SCREEN_PAIRING:
             ui_handle_pairing_screen_button_b();
@@ -2103,6 +1803,10 @@ void ui_handle_button_b(void) {
             break;
         case SCREEN_MODE_SWITCH:
             ui_handle_mode_switch_button_b();
+            break;
+        case SCREEN_SLOTS_CYCLE:
+        case SCREEN_SLOTS_ENTRY:
+            ui_screen_slots_button_b();
             break;
         default:
             break;
@@ -2137,6 +1841,21 @@ void ui_handle_button_c(void) {
             ui_return_to_main_screen();
             lvgl_port_unlock();
             return;
+        case SCREEN_SLOTS_ENTRY:
+            ESP_LOGI(TAG, "Slots: Back (Button C), returning to cycle list");
+            g_slots_entry_pos = ui_screen_slots_get_entry_pos();
+            ui_switch_screen(SCREEN_SLOTS_CYCLE);
+            lvgl_port_unlock();
+            return;
+        case SCREEN_SLOTS_CYCLE:
+            ESP_LOGI(TAG, "Slots: Back (Button C), returning to Main Screen");
+            // Selection first: the main screen is drawn from it (ADR-026)
+            slot_cycle_normalize_selection();
+            ui_return_to_main_screen();
+            lvgl_port_unlock();
+            // Persist outside the LVGL lock, main task only (ADR-022)
+            slot_cycle_save_if_changed();
+            return;
         default:
             break;
     }
@@ -2155,10 +1874,10 @@ void ui_handle_button_c(void) {
     }
     
 
-    // PRECEDENCE 2: Single camera slot selected (0, 1, or 2)
-    if (g_camera_selection != CAMERA_SELECT_ALL) {
-        // Get the selected camera index
-        int cam_idx = (int)g_camera_selection;  // CAMERA_SELECT_0=0, etc.
+    // PRECEDENCE 2: Single-slot entry selected (any slot 0, 1 or 2)
+    int single_slot = slot_cycle_selected_single();
+    if (single_slot >= 0) {
+        int cam_idx = single_slot;
         
         // Check if all conditions are met for highlight tag:
         // - paired, connected, awake, recording, highlight-supported
@@ -2184,11 +1903,15 @@ void ui_handle_button_c(void) {
         return;
     }
     
-    // PRECEDENCE 3: "All Cameras" selection
-    if (g_camera_selection == CAMERA_SELECT_ALL) {
+    // PRECEDENCE 3: multi-slot entry ("All Cameras" semantics restricted to
+    // the entry's slots; other slots are never touched, ADR-026)
+    {
         // Count how many cameras meet all conditions for highlight tag
         int highlight_eligible_count = 0;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (command_logic_slot_is_paired(i) &&
                 command_logic_slot_is_connected(i) &&
                 command_logic_slot_is_awake(i) &&
@@ -2202,6 +1925,9 @@ void ui_handle_button_c(void) {
             // Highlight takes priority - one worker job per eligible slot
             int submitted = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (command_logic_slot_is_paired(i) &&
                     command_logic_slot_is_connected(i) &&
                     command_logic_slot_is_awake(i) &&
@@ -2226,6 +1952,9 @@ void ui_handle_button_c(void) {
         // Sleep candidates are: paired, connected, awake, NOT recording
         int sleep_candidates_count = 0;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (is_camera_sleep_candidate(i)) {
                 sleep_candidates_count++;
             }
@@ -2236,8 +1965,11 @@ void ui_handle_button_c(void) {
             ESP_LOGI(TAG, "Button C: Sending sleep to %d cameras in All Cameras mode", sleep_candidates_count);
             int sent_count = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (is_camera_sleep_candidate(i) &&
-                    ui_submit_job(i, CMD_JOB_SLEEP, false) == ESP_OK) {
+                    ui_submit_job_busy(i, CMD_JOB_SLEEP, false) == ESP_OK) {
                     sent_count++;
                 }
             }
@@ -2257,6 +1989,9 @@ void ui_handle_button_c(void) {
         // No sleep candidates - check for wake candidates (sleeping cameras)
         int wake_candidates_count = 0;
         for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
             if (is_camera_wake_candidate(i)) {
                 wake_candidates_count++;
             }
@@ -2269,17 +2004,32 @@ void ui_handle_button_c(void) {
             // cause each subsequent broadcast to overwrite the previous one.
             ESP_LOGI(TAG, "Button C: Adding %d cameras to wake queue (wake-only mode)", wake_candidates_count);
             
-            // Clear the wake queue first in case there are stale entries
-            wake_queue_clear();
+            // Clear the wake queue first in case there are stale entries.
+            // Only when the entry covers every slot (the former "All
+            // Cameras"): for a subset, clearing would also drop or abort a
+            // queued wake of a slot outside the entry (e.g. a long press),
+            // so the queue is kept and its duplicate check applies (ADR-026).
+            bool entry_has_all_slots = (slot_cycle_selected_mask() == SLOT_CYCLE_MASK_ALL);
+            if (entry_has_all_slots) {
+                wake_queue_clear();
+            }
             
             int queued_count = 0;
             for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
                 if (is_camera_wake_candidate(i)) {
                     // Add to wake queue but do NOT set snapshot_pending
                     // This is wake-only mode, not snapshot mode
                     if (wake_queue_add(i)) {
                         queued_count++;
+                        slot_busy_begin(i, SLOT_BUSY_WAKE);
                         ESP_LOGI(TAG, "Camera %d added to wake queue (wake-only, no snapshot)", i);
+                    } else if (!entry_has_all_slots && wake_queue_contains(i)) {
+                        // Already queued (kept queue of a subset entry)
+                        queued_count++;
+                        slot_busy_begin(i, SLOT_BUSY_WAKE);
                     } else {
                         ESP_LOGW(TAG, "Failed to add camera %d to wake queue", i);
                     }
@@ -2293,9 +2043,9 @@ void ui_handle_button_c(void) {
                 
                 char msg[32];
                 snprintf(msg, sizeof(msg), "Waking %d cameras...", queued_count);
-                ui_show_shutter_bottom_message(msg, M5_COLOR_YELLOW, 2000);
+                ui_post_shutter_message(msg, M5_COLOR_YELLOW, 2000);
             } else {
-                ui_show_shutter_bottom_message("Wakeup failed", M5_COLOR_RED, 1500);
+                ui_post_shutter_message("Wakeup failed", M5_COLOR_RED, 1500);
             }
             lvgl_port_unlock();
             return;
@@ -2311,10 +2061,108 @@ void ui_handle_button_c(void) {
 /**
  * @brief Execute main screen button action
  * 
- * Wrapper function used for GPIO triggers.
+ * Same as a Button A click.
  */
 void ui_execute_main_screen_action(void) {
     ui_handle_button_a();
+}
+
+/**
+ * @brief Whether the current context assigns a long-press function to a button
+ *
+ * Read by button_input when a press is accepted; the answer is latched until
+ * release. true: CLICK fires on release (held < BUTTON_LONG_PRESS_MS), LONG
+ * at the threshold. false: CLICK fires on press, never LONG (ADR-024).
+ *
+ * Main screen: A/B/C long press = shutter action on slot 0/1/2 (plan 0016).
+ * Not during the boot scan: the long press is ignored there, and returning
+ * false keeps Button C "Stop" firing on press. Every other screen: false.
+ */
+bool ui_button_has_long_press(button_id_t btn) {
+    ui_screen_t screen = g_ui_state.current_screen;
+    if ((unsigned)btn >= BTN_COUNT || screen != SCREEN_MAIN) {
+        return false;
+    }
+    return !connect_logic_is_boot_scan_active();
+}
+
+/**
+ * @brief Long press on the main screen: shutter action on a fixed slot
+ *
+ * Button A/B/C -> slot 0/1/2, independent of the camera selection (which is
+ * not changed). Behaves like a short Button A press with that slot selected:
+ * - connected: shutter action; a sleeping slot is woken through the wake
+ *   queue
+ * - paired but disconnected: Connect, same reconnect as Button A "Connect"
+ * Empty, connecting and unresponsive slots are ignored silently (no pairing
+ * and no unresponsive recovery by long press).
+ */
+static void ui_handle_slot_long_press(button_id_t btn, int slot) {
+    static const char btn_name[] = { 'A', 'B', 'C' };
+
+    if (slot < 0 || slot >= NUM_CAMERAS) {
+        return;
+    }
+    /* The screen or the boot scan may have changed between press and
+     * threshold */
+    if (g_ui_state.current_screen != SCREEN_MAIN || connect_logic_is_boot_scan_active()) {
+        ESP_LOGD(TAG, "Button %c long press ignored: not on main screen or boot scan active",
+                 btn_name[btn]);
+        return;
+    }
+
+    lvgl_port_lock(0);
+    camera_connection_state_t state = g_camera_states[slot].connection_state;
+    if (state == CAM_STATE_PAIRED_DISCONNECTED) {
+        ESP_LOGI(TAG, "Button %c long press: connecting slot %d", btn_name[btn], slot);
+        // Connecting icon and busy state first, like Button A "Connect"
+        g_camera_states[slot].connection_state = CAM_STATE_CONNECTING;
+        slot_busy_begin(slot, SLOT_BUSY_CONNECT);
+        g_ui_state.display_needs_update = true;
+        lvgl_port_unlock();
+
+        // Blocking (scan + protocol handshake) and shows its messages with
+        // delays, so it runs without the LVGL lock (ADR-024 amendment)
+        int result = ui_perform_complete_reconnection(slot, true);
+        ESP_LOGI(TAG, "Long press connect for camera %d: %s",
+                 slot, result == 0 ? "successful" : "failed");
+
+        lvgl_port_lock(0);
+        g_ui_state.display_needs_update = true;
+        lvgl_port_unlock();
+        return;
+    }
+    if (state != CAM_STATE_CONNECTED) {
+        lvgl_port_unlock();
+        ESP_LOGD(TAG, "Button %c long press ignored: slot %d not connected (state %d)",
+                 btn_name[btn], slot, (int)state);
+        return;
+    }
+    ESP_LOGI(TAG, "Button %c long press: slot %d", btn_name[btn], slot);
+    ui_slot_shutter_action(slot, true);
+    lvgl_port_unlock();
+}
+
+/**
+ * @brief Route a button event from button_input to the screen-aware handlers
+ *
+ * Main task only. Handlers take the LVGL lock themselves; button-triggered
+ * camera commands still go through command_worker_submit() (ADR-020).
+ */
+void ui_handle_button_event(button_id_t btn, button_event_t ev) {
+    if (ev == BTN_EVENT_CLICK) {
+        switch (btn) {
+            case BTN_A: ui_handle_button_a(); break;
+            case BTN_B: ui_handle_button_b(); break;
+            case BTN_C: ui_handle_button_c(); break;
+            default: break;
+        }
+    } else if (ev == BTN_EVENT_LONG) {
+        /* Only the main screen has long-press functions: A/B/C -> slot 0/1/2 */
+        if ((unsigned)btn < BTN_COUNT) {
+            ui_handle_slot_long_press(btn, (int)btn);
+        }
+    }
 }
 
 /**
@@ -2427,201 +2275,32 @@ void ui_show_not_connected_message(void) {
  * process that requires user interaction on the camera side.
  */
 /**
- * @brief Handle main screen activation (shutter control)
- * 
- * Controls photo capture and video recording based on current camera mode:
- * - Photo mode: Always takes a photo
- * - Video modes: Toggles recording start/stop
- * 
- * Requires active camera connection to function.
+ * @brief Shutter action for one connected slot
+ *
+ * The per-slot primitive behind a short Button A press in single-camera mode
+ * and a long press on the main screen (A/B/C -> slot 0/1/2):
+ * - sleeping -> wake + snapshot (snapshot key is sent by status logic on wake)
+ * - photo mode -> photo; recording -> stop; otherwise -> start
+ * Commands go to the slot's worker (ADR-020); never waits on the main task.
+ *
+ * Caller holds the LVGL lock and has checked CAM_STATE_CONNECTED.
+ *
+ * @param cam_idx        Slot 0..2
+ * @param wake_via_queue true: a sleeping slot is woken through the wake queue
+ *                       (long press); false: direct broadcast (short press)
  */
-void ui_screen_main(void) {
-    ESP_LOGI(TAG, "Executing main screen action (shutter control)");
-    
-    if (connect_logic_is_boot_scan_active()) {
-        ESP_LOGI(TAG, "Boot scan active - ignoring shutter action");
-        return;
-    }
-
-    // Check which camera(s) are selected
-    if (g_camera_selection == CAMERA_SELECT_ALL) {
-        // "All cameras" mode - control all connected cameras
-        ESP_LOGI(TAG, "All cameras mode - controlling all connected cameras");
-        
-        // Only CAM_STATE_CONNECTED slots take part; unresponsive slots are
-        // skipped by these checks (ADR-019)
-        // Determine if any connected camera is recording
-        bool any_recording = false;
-        for (int i = 0; i < NUM_CAMERAS; i++) {
-            if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
-                any_recording = true;
-                break;
-            }
-        }
-        
-        // Toggle: if any are recording, stop all; otherwise start all
-        // Use async (non-blocking) commands for better synchronization
-        if (any_recording) {
-            // Stop all connected cameras that are recording
-            ESP_LOGI(TAG, "Stopping all recording cameras (synchronized)");
-            // One async job per slot; the workers run in parallel, so the
-            // stops stay close together (ADR-020)
-            int cameras_stopped = 0;
-            int cameras_busy = 0;
-            for (int i = 0; i < NUM_CAMERAS; i++) {
-                if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
-                    esp_err_t ret = ui_submit_job(i, CMD_JOB_RECORD_STOP_ASYNC, false);
-                    if (ret == ESP_OK) {
-                        cameras_stopped++;
-                    } else if (ret == ESP_ERR_NOT_FINISHED) {
-                        cameras_busy++;
-                    }
-                }
-            }
-            ESP_LOGI(TAG, "Stop jobs submitted: %d (busy: %d)", cameras_stopped, cameras_busy);
-            if (cameras_stopped > 0) {
-                ui_post_shutter_message("Stopping All", M5_COLOR_YELLOW, 1000);
-            } else {
-                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
-            }
-        } else {
-            // Start all connected cameras (awake cameras get recording command, sleeping cameras queued for snapshot)
-            ESP_LOGI(TAG, "Starting all connected cameras (synchronized)");
-            int cameras_started = 0;
-            int cameras_queued = 0;
-            int cameras_busy = 0;
-            
-            // First pass: Process all non-sleeping cameras immediately
-            for (int i = 0; i < NUM_CAMERAS; i++) {
-                camera_state_t *cam_state = &g_camera_states[i];
-                
-                // Only process connected cameras
-                if (cam_state->connection_state != CAM_STATE_CONNECTED) {
-                    continue;
-                }
-                
-                // Check if camera is sleeping
-                bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
-                
-                if (!is_sleeping) {
-                    // Camera is awake - async start job on its worker (ADR-020)
-                    esp_err_t ret = ui_submit_job(i, CMD_JOB_RECORD_START_ASYNC, false);
-                    if (ret == ESP_OK) {
-                        cameras_started++;
-                    } else if (ret == ESP_ERR_NOT_FINISHED) {
-                        cameras_busy++;
-                    }
-                }
-            }
-            
-            // Second pass: Queue all sleeping cameras for serialized wake-up
-            for (int i = 0; i < NUM_CAMERAS; i++) {
-                camera_state_t *cam_state = &g_camera_states[i];
-                
-                // Only process connected cameras
-                if (cam_state->connection_state != CAM_STATE_CONNECTED) {
-                    continue;
-                }
-                
-                // Check if camera is sleeping
-                bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
-                
-                if (is_sleeping) {
-                    // Camera is sleeping - add to wake queue for snapshot mode
-                    if (cam_state->snapshot_pending) {
-                        ESP_LOGW(TAG, "Camera %d: Snapshot already pending, skipping duplicate request", i);
-                        continue;
-                    }
-                    
-                    // Add to wake queue
-                    if (wake_queue_add(i)) {
-                        // Set snapshot pending flag and record timestamp
-                        cam_state->snapshot_pending = true;
-                        cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-                        cam_state->wake_retry_count = 0;  // Reset retry counter for new request
-                        cameras_queued++;
-                        ESP_LOGI(TAG, "Camera %d: snapshot_pending SET (All Cameras mode, added to wake queue)", i);
-                        ESP_LOGD(TAG, "Camera %d: last_snapshot_request_ms = %lu", i, cam_state->last_snapshot_request_ms);
-                    } else {
-                        ESP_LOGW(TAG, "Failed to add camera %d to wake queue", i);
-                    }
-                }
-            }
-            
-            // Start queue processing if queue is not empty
-            if (!wake_queue_is_empty()) {
-                g_wake_queue.queue_active = true;
-                ESP_LOGI(TAG, "Wake queue has %d camera(s), starting serialized wake-up processing", wake_queue_get_count());
-            }
-            
-            // Show appropriate notification (non-blocking)
-            ESP_LOGI(TAG, "Start jobs submitted: %d, queued for wake: %d, busy: %d",
-                     cameras_started, cameras_queued, cameras_busy);
-            if (cameras_queued > 0 && cameras_started > 0) {
-                char msg[48];
-                snprintf(msg, sizeof(msg), "Starting %d, Queued %d", cameras_started, cameras_queued);
-                ui_post_shutter_message(msg, M5_COLOR_GREEN, 1500);
-            } else if (cameras_queued > 0) {
-                char msg[32];
-                snprintf(msg, sizeof(msg), "Queued %d camera(s)", cameras_queued);
-                ui_post_shutter_message(msg, M5_COLOR_YELLOW, 1500);
-            } else if (cameras_started > 0) {
-                ui_post_shutter_message("Starting All", M5_COLOR_GREEN, 1000);
-            } else if (cameras_busy > 0) {
-                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
-            } else {
-                ui_post_shutter_message("No cameras ready", M5_COLOR_ORANGE, 1000);
-            }
-        }
-        return;
-    }
-    
-    // Single camera selected - get the camera index
-    int cam_idx = (int)g_camera_selection;  // CAMERA_SELECT_0=0, etc.
-    ESP_LOGI(TAG, "Single camera mode - camera %d selected", cam_idx);
-    
-    // Check if this camera is paired - if not, open Pairing Screen
-    if (g_camera_states[cam_idx].connection_state == CAM_STATE_UNPAIRED) {
-        ESP_LOGI(TAG, "Camera %d is not paired - opening Pairing Screen", cam_idx);
-        ui_start_pairing(cam_idx);
-        return;
-    }
-    
-    // Check if this camera is connected
-    if (g_camera_states[cam_idx].connection_state != CAM_STATE_CONNECTED) {
-        // Unresponsive link (ADR-019): tear down and reconnect after lock release.
-        // The connecting flag goes first so the watchdog leaves the slot alone.
-        if (g_camera_states[cam_idx].connection_state == CAM_STATE_UNRESPONSIVE) {
-            ESP_LOGI(TAG, "Camera %d is unresponsive - scheduling teardown and reconnect", cam_idx);
-            connect_logic_set_slot_connecting(cam_idx, true);
-            g_camera_states[cam_idx].connection_state = CAM_STATE_CONNECTING;
-            s_pending_unresponsive_reconnect = cam_idx;
-            g_ui_state.display_needs_update = true;
-            return;
-        }
-        // Camera is paired but not connected - mark as connecting and defer to after lock release
-        if (g_camera_states[cam_idx].connection_state == CAM_STATE_PAIRED_DISCONNECTED || 
-            g_camera_states[cam_idx].connection_state == CAM_STATE_CONNECTING) {
-            ESP_LOGI(TAG, "Camera %d is paired but disconnected - scheduling reconnect", cam_idx);
-            g_camera_states[cam_idx].connection_state = CAM_STATE_CONNECTING;
-            g_ui_state.display_needs_update = true;
-            return;
-        } else {
-            // Unknown connection state
-            ESP_LOGW(TAG, "Camera %d is in unknown connection state: %d", cam_idx, g_camera_states[cam_idx].connection_state);
-            ui_show_shutter_bottom_message("Not Connected", M5_COLOR_RED, 1500);
-            return;
-        }
-    }
-    
-    // Get camera state for the selected camera
+static void ui_slot_shutter_action(int cam_idx, bool wake_via_queue) {
     camera_state_t *cam_state = &g_camera_states[cam_idx];
     
     // Check if camera is in sleep mode (use per-camera state)
     bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
     
     if (is_sleeping) {
-        // Camera is asleep - initiate snapshot mode
+        // Camera is asleep - initiate snapshot mode.
+        // Messages here must be posted (non-blocking): the caller holds the
+        // LVGL lock, and the blocking ui_show_shutter_bottom_message() would
+        // keep it during its delay, freezing the display (busy indicator)
+        // and the main loop (wake queue) for that time.
         // Single camera mode: send wake broadcast immediately, snapshot key is sent
         // automatically when camera wakes (power_mode 3 → 0) via status update handler
         ESP_LOGI(TAG, "LOGIC_STATUS: Camera %d: Snapshot requested while sleeping. Starting wake-up broadcast.", cam_idx);
@@ -2632,6 +2311,32 @@ void ui_screen_main(void) {
             return;
         }
         
+        if (wake_via_queue) {
+            /* Long press: there is only one advertising instance, so a direct
+             * broadcast would overwrite one that is already running (wake
+             * queue in All Cameras mode, or a second long press within 3 s).
+             * The wake queue serialises broadcasts, starts within one main
+             * loop cycle when idle and handles timeout and retry itself. A
+             * direct broadcast from a short press that gets overwritten is
+             * retried by ui_process_single_camera_wake_timeout() once the
+             * queue is idle again. */
+            if (!wake_queue_add(cam_idx)) {
+                ESP_LOGW(TAG, "Camera %d: could not add to wake queue", cam_idx);
+                return;
+            }
+            cam_state->snapshot_pending = true;
+            cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            cam_state->wake_retry_count = 0;
+            g_wake_queue.queue_active = true;
+            slot_busy_begin(cam_idx, SLOT_BUSY_SNAPSHOT);
+            ESP_LOGI(TAG, "Camera %d: snapshot_pending SET (long press, added to wake queue)", cam_idx);
+            char qmsg[32];
+            snprintf(qmsg, sizeof(qmsg), "Waking camera %d for snapshot...", cam_idx);
+            ui_post_shutter_message(qmsg, M5_COLOR_YELLOW, 2000);
+            g_ui_state.display_needs_update = true;
+            return;
+        }
+
         // Set snapshot pending flag and record timestamp
         cam_state->snapshot_pending = true;
         cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
@@ -2648,14 +2353,16 @@ void ui_screen_main(void) {
             // Clear snapshot pending since we couldn't initiate the wake sequence
             cam_state->snapshot_pending = false;
             ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (wake broadcast failed to start)", cam_idx);
-            ui_show_shutter_bottom_message("Snapshot failed: wake error", M5_COLOR_RED, 2000);
+            ui_post_shutter_message("Snapshot failed: wake error", M5_COLOR_RED, 2000);
             return;
         }
         
+        slot_busy_begin(cam_idx, SLOT_BUSY_SNAPSHOT);
+
         // Show notification that we're waking the camera for snapshot
         char msg[32];
         snprintf(msg, sizeof(msg), "Waking camera %d for snapshot...", cam_idx);
-        ui_show_shutter_bottom_message(msg, M5_COLOR_YELLOW, 2000);
+        ui_post_shutter_message(msg, M5_COLOR_YELLOW, 2000);
         
         // Mark UI for update to reflect any state changes
         g_ui_state.display_needs_update = true;
@@ -2693,7 +2400,216 @@ void ui_screen_main(void) {
         ESP_LOGI(TAG, "Starting recording in video mode");
         job = CMD_JOB_RECORD_START;
     }
-    post_submit_feedback(ui_submit_job(cam_idx, job, true), NULL, 0);
+    post_submit_feedback(ui_submit_job_busy(cam_idx, job, true), NULL, 0);
+}
+
+/**
+ * @brief Handle main screen activation (shutter control)
+ * 
+ * Controls photo capture and video recording based on current camera mode:
+ * - Photo mode: Always takes a photo
+ * - Video modes: Toggles recording start/stop
+ * 
+ * Requires active camera connection to function.
+ */
+void ui_screen_main(void) {
+    ESP_LOGI(TAG, "Executing main screen action (shutter control)");
+    
+    if (connect_logic_is_boot_scan_active()) {
+        ESP_LOGI(TAG, "Boot scan active - ignoring shutter action");
+        return;
+    }
+
+    // Check which camera(s) are selected
+    int single_slot = slot_cycle_selected_single();
+    if (single_slot < 0) {
+        // Multi-slot entry - control the connected cameras of the entry only
+        ESP_LOGI(TAG, "Multi-slot mode (mask 0x%x) - controlling connected cameras of the entry",
+                 (unsigned)slot_cycle_selected_mask());
+        
+        // Only CAM_STATE_CONNECTED slots take part; unresponsive slots are
+        // skipped by these checks (ADR-019)
+        // Determine if any connected camera is recording
+        bool any_recording = false;
+        for (int i = 0; i < NUM_CAMERAS; i++) {
+            if (!slot_cycle_selected_has(i)) {
+                continue;   /* not part of the selected entry */
+            }
+            if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
+                any_recording = true;
+                break;
+            }
+        }
+        
+        // Toggle: if any are recording, stop all; otherwise start all
+        // Use async (non-blocking) commands for better synchronization
+        if (any_recording) {
+            // Stop all connected cameras that are recording
+            ESP_LOGI(TAG, "Stopping all recording cameras (synchronized)");
+            // One async job per slot; the workers run in parallel, so the
+            // stops stay close together (ADR-020)
+            int cameras_stopped = 0;
+            int cameras_busy = 0;
+            for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
+                if (g_camera_states[i].connection_state == CAM_STATE_CONNECTED && g_camera_states[i].is_recording) {
+                    esp_err_t ret = ui_submit_job_busy(i, CMD_JOB_RECORD_STOP_ASYNC, false);
+                    if (ret == ESP_OK) {
+                        cameras_stopped++;
+                    } else if (ret == ESP_ERR_NOT_FINISHED) {
+                        cameras_busy++;
+                    }
+                }
+            }
+            ESP_LOGI(TAG, "Stop jobs submitted: %d (busy: %d)", cameras_stopped, cameras_busy);
+            if (cameras_stopped > 0) {
+                ui_post_shutter_message("Stopping All", M5_COLOR_YELLOW, 1000);
+            } else {
+                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
+            }
+        } else {
+            // Start all connected cameras (awake cameras get recording command, sleeping cameras queued for snapshot)
+            ESP_LOGI(TAG, "Starting all connected cameras (synchronized)");
+            int cameras_started = 0;
+            int cameras_queued = 0;
+            int cameras_busy = 0;
+            
+            // First pass: Process all non-sleeping cameras immediately
+            for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
+                camera_state_t *cam_state = &g_camera_states[i];
+                
+                // Only process connected cameras
+                if (cam_state->connection_state != CAM_STATE_CONNECTED) {
+                    continue;
+                }
+                
+                // Check if camera is sleeping
+                bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
+                
+                if (!is_sleeping) {
+                    // Camera is awake - async start job on its worker (ADR-020)
+                    esp_err_t ret = ui_submit_job_busy(i, CMD_JOB_RECORD_START_ASYNC, false);
+                    if (ret == ESP_OK) {
+                        cameras_started++;
+                    } else if (ret == ESP_ERR_NOT_FINISHED) {
+                        cameras_busy++;
+                    }
+                }
+            }
+            
+            // Second pass: Queue all sleeping cameras for serialized wake-up
+            for (int i = 0; i < NUM_CAMERAS; i++) {
+                if (!slot_cycle_selected_has(i)) {
+                    continue;   /* not part of the selected entry */
+                }
+                camera_state_t *cam_state = &g_camera_states[i];
+                
+                // Only process connected cameras
+                if (cam_state->connection_state != CAM_STATE_CONNECTED) {
+                    continue;
+                }
+                
+                // Check if camera is sleeping
+                bool is_sleeping = (cam_state->power_mode == 3) || cam_state->is_sleeping;
+                
+                if (is_sleeping) {
+                    // Camera is sleeping - add to wake queue for snapshot mode
+                    if (cam_state->snapshot_pending) {
+                        ESP_LOGW(TAG, "Camera %d: Snapshot already pending, skipping duplicate request", i);
+                        continue;
+                    }
+                    
+                    // Add to wake queue
+                    if (wake_queue_add(i)) {
+                        // Set snapshot pending flag and record timestamp
+                        cam_state->snapshot_pending = true;
+                        cam_state->last_snapshot_request_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+                        cam_state->wake_retry_count = 0;  // Reset retry counter for new request
+                        cameras_queued++;
+                        slot_busy_begin(i, SLOT_BUSY_SNAPSHOT);
+                        ESP_LOGI(TAG, "Camera %d: snapshot_pending SET (All Cameras mode, added to wake queue)", i);
+                        ESP_LOGD(TAG, "Camera %d: last_snapshot_request_ms = %lu", i, cam_state->last_snapshot_request_ms);
+                    } else {
+                        ESP_LOGW(TAG, "Failed to add camera %d to wake queue", i);
+                    }
+                }
+            }
+            
+            // Start queue processing if queue is not empty
+            if (!wake_queue_is_empty()) {
+                g_wake_queue.queue_active = true;
+                ESP_LOGI(TAG, "Wake queue has %d camera(s), starting serialized wake-up processing", wake_queue_get_count());
+            }
+            
+            // Show appropriate notification (non-blocking)
+            ESP_LOGI(TAG, "Start jobs submitted: %d, queued for wake: %d, busy: %d",
+                     cameras_started, cameras_queued, cameras_busy);
+            if (cameras_queued > 0 && cameras_started > 0) {
+                char msg[48];
+                snprintf(msg, sizeof(msg), "Starting %d, Queued %d", cameras_started, cameras_queued);
+                ui_post_shutter_message(msg, M5_COLOR_GREEN, 1500);
+            } else if (cameras_queued > 0) {
+                char msg[32];
+                snprintf(msg, sizeof(msg), "Queued %d camera(s)", cameras_queued);
+                ui_post_shutter_message(msg, M5_COLOR_YELLOW, 1500);
+            } else if (cameras_started > 0) {
+                ui_post_shutter_message("Starting All", M5_COLOR_GREEN, 1000);
+            } else if (cameras_busy > 0) {
+                ui_post_shutter_message("Busy", M5_COLOR_ORANGE, 1000);
+            } else {
+                ui_post_shutter_message("No cameras ready", M5_COLOR_ORANGE, 1000);
+            }
+        }
+        return;
+    }
+    
+    // Single-slot entry selected
+    int cam_idx = single_slot;
+    ESP_LOGI(TAG, "Single camera mode - camera %d selected", cam_idx);
+    
+    // Check if this camera is paired - if not, open Pairing Screen
+    if (g_camera_states[cam_idx].connection_state == CAM_STATE_UNPAIRED) {
+        ESP_LOGI(TAG, "Camera %d is not paired - opening Pairing Screen", cam_idx);
+        ui_start_pairing(cam_idx);
+        return;
+    }
+    
+    // Check if this camera is connected
+    if (g_camera_states[cam_idx].connection_state != CAM_STATE_CONNECTED) {
+        // Unresponsive link (ADR-019): tear down and reconnect after lock release.
+        // The connecting flag goes first so the watchdog leaves the slot alone.
+        if (g_camera_states[cam_idx].connection_state == CAM_STATE_UNRESPONSIVE) {
+            ESP_LOGI(TAG, "Camera %d is unresponsive - scheduling teardown and reconnect", cam_idx);
+            connect_logic_set_slot_connecting(cam_idx, true);
+            g_camera_states[cam_idx].connection_state = CAM_STATE_CONNECTING;
+            slot_busy_begin(cam_idx, SLOT_BUSY_CONNECT);
+            s_pending_unresponsive_reconnect = cam_idx;
+            g_ui_state.display_needs_update = true;
+            return;
+        }
+        // Camera is paired but not connected - mark as connecting and defer to after lock release
+        if (g_camera_states[cam_idx].connection_state == CAM_STATE_PAIRED_DISCONNECTED || 
+            g_camera_states[cam_idx].connection_state == CAM_STATE_CONNECTING) {
+            ESP_LOGI(TAG, "Camera %d is paired but disconnected - scheduling reconnect", cam_idx);
+            g_camera_states[cam_idx].connection_state = CAM_STATE_CONNECTING;
+            slot_busy_begin(cam_idx, SLOT_BUSY_CONNECT);
+            g_ui_state.display_needs_update = true;
+            return;
+        } else {
+            // Unknown connection state
+            ESP_LOGW(TAG, "Camera %d is in unknown connection state: %d", cam_idx, g_camera_states[cam_idx].connection_state);
+            ui_post_shutter_message("Not Connected", M5_COLOR_RED, 1500);
+            return;
+        }
+    }
+    
+    // Connected: same primitive as the long press on this slot
+    ui_slot_shutter_action(cam_idx, false);
 }
 
 /* ================== Wake-Up Queue Management ================== */
@@ -2765,6 +2681,19 @@ int wake_queue_get_next(void) {
 /**
  * @brief Clear entire wake-up queue
  */
+/**
+ * @brief Whether a slot is waiting in (or being processed by) the wake queue
+ */
+static bool wake_queue_contains(int slot) {
+    for (int i = 0; i < g_wake_queue.queue_count; i++) {
+        int idx = (g_wake_queue.queue_head + i) % NUM_CAMERAS;
+        if (g_wake_queue.camera_indices[idx] == slot) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void wake_queue_clear(void) {
     g_wake_queue.queue_head = 0;
     g_wake_queue.queue_tail = 0;
@@ -2834,6 +2763,28 @@ void ui_process_command_results(void) {
         bool ok = (r.status == ESP_OK) && (r.ret_code == 0 || r.ret_code == -1);
         bool announce = s_announce_result[r.slot];
         s_announce_result[r.slot] = false;
+
+        if (!ok) {
+            /* A failed job ends its own indicator only, never a newer
+             * action of another kind (e.g. a wake) */
+            uint32_t mask = 0;
+            switch (r.job) {
+                case CMD_JOB_RECORD_START:
+                case CMD_JOB_RECORD_START_ASYNC:
+                    mask = SLOT_BUSY_BIT(SLOT_BUSY_REC_START) | SLOT_BUSY_BIT(SLOT_BUSY_PHOTO);
+                    break;
+                case CMD_JOB_RECORD_STOP:
+                case CMD_JOB_RECORD_STOP_ASYNC:
+                    mask = SLOT_BUSY_BIT(SLOT_BUSY_REC_STOP);
+                    break;
+                case CMD_JOB_SLEEP:
+                    mask = SLOT_BUSY_BIT(SLOT_BUSY_SLEEP);
+                    break;
+                default:
+                    break;
+            }
+            slot_busy_clear_kinds(r.slot, mask);
+        }
 
         if (!announce) {
             ESP_LOGI(TAG, "Camera %d: %s result %s (ret_code=%d)", r.slot,
@@ -2980,6 +2931,7 @@ void ui_process_wake_queue(void) {
                     if (cam_state->connection_state != CAM_STATE_CONNECTED) {
                         ESP_LOGW(TAG, "Wake queue: Camera %d no longer connected, clearing snapshot_pending and skipping", camera_index);
                         cam_state->snapshot_pending = false;
+                        slot_busy_clear_kinds(camera_index, SLOT_BUSY_WAKE_KINDS);
                         ESP_LOGD(TAG, "Wake queue: Camera %d snapshot_pending cleared (disconnected)", camera_index);
                         // Continue to next camera (stay in IDLE, will process next iteration)
                         break;
@@ -3010,6 +2962,7 @@ void ui_process_wake_queue(void) {
                         ESP_LOGE(TAG, "Wake queue: Failed to start broadcast for camera %d: %s", 
                                  camera_index, esp_err_to_name(wake_result));
                         cam_state->snapshot_pending = false;
+                        slot_busy_clear_kinds(camera_index, SLOT_BUSY_WAKE_KINDS);
                         ESP_LOGD(TAG, "Wake queue: Camera %d snapshot_pending cleared (broadcast failed)", camera_index);
                         // Continue to next camera (stay in IDLE, will process next iteration)
                         break;
@@ -3106,6 +3059,7 @@ void ui_process_wake_queue(void) {
                                 if (cam_state->snapshot_pending) {
                                     cam_state->snapshot_pending = false;
                                 }
+                                slot_busy_clear_kinds(g_current_wake_camera_index, SLOT_BUSY_WAKE_KINDS);
                                 cam_state->wake_retry_count = 0;
                                 g_current_wake_camera_index = -1;
                                 g_wake_queue_state = WAKE_QUEUE_IDLE;
@@ -3120,6 +3074,7 @@ void ui_process_wake_queue(void) {
                                 ESP_LOGW(TAG, "Wake queue: Camera %d did not wake up after %d attempts (wake-only mode)", 
                                          g_current_wake_camera_index, cam_state->wake_retry_count + 1);
                             }
+                            slot_busy_clear_kinds(g_current_wake_camera_index, SLOT_BUSY_WAKE_KINDS);
                             cam_state->wake_retry_count = 0;  // Reset for next time
                             g_current_wake_camera_index = -1;
                             g_wake_queue_state = WAKE_QUEUE_IDLE;
@@ -3212,6 +3167,7 @@ void ui_process_single_camera_wake_timeout(void) {
             ESP_LOGW(TAG, "Single camera wake timeout: Camera %d disconnected, clearing snapshot_pending", i);
             cam_state->snapshot_pending = false;
             cam_state->wake_retry_count = 0;
+            slot_busy_clear_kinds(i, SLOT_BUSY_WAKE_KINDS);
             ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (disconnected during wake)", i);
         } else if (is_sleeping) {
             // Camera is still sleeping after timeout
@@ -3233,6 +3189,7 @@ void ui_process_single_camera_wake_timeout(void) {
                              i, esp_err_to_name(wake_result));
                     cam_state->snapshot_pending = false;
                     cam_state->wake_retry_count = 0;
+                    slot_busy_clear_kinds(i, SLOT_BUSY_WAKE_KINDS);
                     ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (retry broadcast failed)", i);
                 }
             } else {
@@ -3241,6 +3198,7 @@ void ui_process_single_camera_wake_timeout(void) {
                          i, cam_state->wake_retry_count + 1);
                 cam_state->snapshot_pending = false;
                 cam_state->wake_retry_count = 0;
+                slot_busy_clear_kinds(i, SLOT_BUSY_WAKE_KINDS);
                 ESP_LOGD(TAG, "Camera %d: snapshot_pending cleared (wake timeout after retries)", i);
             }
         } else {

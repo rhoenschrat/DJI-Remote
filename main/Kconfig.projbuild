@@ -47,3 +47,32 @@ menu "GPS Configuration"
             GPIO number for GPS UART RX (GPS to ESP).
 
 endmenu
+
+menu "UI Options"
+
+    choice UI_STATUS_WARN_STYLE
+        prompt "SD card / battery warning style"
+        default UI_STATUS_WARN_BACKGROUND
+        help
+            How the Main Screen marks a low SD card or battery value of a
+            camera slot. Thresholds (both styles): SD card <= 16 GB free
+            yellow, <= 6 GB red; battery <= 25 % yellow, <= 10 % red.
+
+            Build-time only: there is no runtime or user-facing switch. A
+            board sdkconfig.defaults.* file may override the default.
+
+        config UI_STATUS_WARN_BACKGROUND
+            bool "Row background"
+            help
+                The whole status row gets a yellow or red background across
+                the slot width; text and icon turn black (yellow) or white
+                (red).
+
+        config UI_STATUS_WARN_TINT
+            bool "Text/icon tint (legacy)"
+            help
+                Only the row's text and icon are tinted yellow or red
+                (behavior before plan 0019).
+    endchoice
+
+endmenu

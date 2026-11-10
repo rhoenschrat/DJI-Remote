@@ -9,7 +9,8 @@
 #define SETTINGS_ITEM_SLEEP_WAKEUP       1
 #define SETTINGS_ITEM_CONNECT_DISCONNECT 2
 #define SETTINGS_ITEM_PAIR_UNPAIR        3
-#define SETTINGS_ITEM_COUNT              4
+#define SETTINGS_ITEM_SLOTS              4   /* global slot cycle (plan 0018), always last */
+#define SETTINGS_ITEM_COUNT              5
 
 /**
  * Create the Settings screen LVGL widget tree.

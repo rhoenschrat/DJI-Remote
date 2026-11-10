@@ -1,7 +1,7 @@
 # DJI-Remote – Multi-Camera Remote Control for DJI Osmo Action Cameras
 ### Powered by M5Stack Basic V2.7 (ESP32) and Waveshare ESP32-S3-LCD-1.9 (ESP32-S3)
 
-![](https://img.shields.io/badge/version-V1.2.0-red.svg) ![License](https://img.shields.io/github/license/rhoenschrat/DJI-Remote) ![Platform](https://img.shields.io/badge/platform-ESP32%20%7C%20ESP32--S3-orange) ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5.1-blue)
+![](https://img.shields.io/badge/version-V1.3.0-red.svg) ![License](https://img.shields.io/github/license/rhoenschrat/DJI-Remote) ![Platform](https://img.shields.io/badge/platform-ESP32%20%7C%20ESP32--S3-orange) ![ESP-IDF](https://img.shields.io/badge/ESP--IDF-v5.5.1-blue)
 
 <img title="DJI-Remote" src="docs/images/dji-remote.jpg" alt="DJI-Reemote">
 
@@ -146,11 +146,11 @@ External buttons are controlled at build-time via:
 UI_ENABLE_EXTERNAL_BUTTONS
 ```
 
-Located in `main/ui.c`.
+Located in `main/button_input.c`.
 
 **Enabled (default):**
-- GPIO26 / GPIO21 / GPIO22 configured as inputs with interrupts
-- External and internal buttons work in parallel
+- GPIO26 / GPIO21 / GPIO22 configured as inputs (polled, no interrupts)
+- External and internal buttons work in parallel and behave identically
 
 **Disabled:**
 - External buttons are ignored
@@ -256,8 +256,8 @@ Both targets are flashed via [espflash.app](https://espflash.app)
 (Chrome or Edge required). Download the correct binary for your hardware from
 the [latest release](https://github.com/rhoenschrat/DJI-Remote/releases/latest):
 
-- `dji-remote-v1.2.0-m5stack-basic-v27.bin` — for M5Stack Basic V2.7
-- `dji-remote-v1.2.0-waveshare-s3-lcd19.bin` — for Waveshare ESP32-S3-LCD-1.9
+- `dji-remote-v1.3.0-m5stack-basic-v27.bin` — for M5Stack Basic V2.7
+- `dji-remote-v1.3.0-waveshare-s3-lcd19.bin` — for Waveshare ESP32-S3-LCD-1.9
 
 Select the port, load the `.bin` file, and flash — no toolchain required.
 

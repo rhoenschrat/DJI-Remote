@@ -52,6 +52,15 @@ typedef struct {
         int32_t bat_icon_x, bat_icon_y, bat_text_x, bat_text_y;
     } cam_detail;
 
+    /* Warning backgrounds of the SD card and battery rows (plan 0019),
+     * relative to the camera block's content area, i.e. inside its 1 px
+     * border (x = 0 is the first inner pixel). Created before the row's icon
+     * and text so they are drawn below them. */
+    struct {
+        int32_t sd_x, sd_y, sd_w, sd_h;
+        int32_t bat_x, bat_y, bat_w, bat_h;
+    } row_bg;
+
     /* Status bar (notification + GPS) */
     struct {
         int32_t notif_x, notif_y;
@@ -111,6 +120,16 @@ typedef struct {
         int32_t icon_ofs_y;
         int32_t label_ofs_y;
     } mode;
+
+    /* Per-slot busy indicator (plan 0017). enabled == false: no widgets and
+     * no visibility timer are created (presets with a notification line). */
+    struct {
+        bool    enabled;
+        int32_t main_x, main_y;   /* relative to the camera block */
+        int32_t main_size;        /* 32: lvgl_busy_icon_32 */
+        int32_t menu_x, menu_y;   /* absolute, Settings screen */
+        int32_t menu_size;        /* 24: lvgl_busy_icon_24 */
+    } busy;
 
 } ui_layout_t;
 

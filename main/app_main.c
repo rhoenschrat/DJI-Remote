@@ -10,7 +10,7 @@
  * - Shutter control (photo/video recording)
  * - Camera mode switching
  * - Sleep/wake functionality
- * - GPIO trigger support for external hardware
+ * - Internal and optional external buttons (non-blocking, ADR-024)
  * 
  * Hardware: M5Stack Basic V2.7 (ESP32-based)
  * Display: 320x240 TFT LCD
@@ -20,7 +20,6 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "driver/gpio.h"
 #include <math.h>
 
 #include "connect_logic.h"
@@ -28,28 +27,11 @@
 #include "diag.h"
 #include "sdkconfig.h"
 
-/* Board HAL selection — driven by Kconfig (main/Kconfig.projbuild) */
-#if defined(CONFIG_BOARD_M5STACK_BASIC_V27)
-  #include "m5stack_basic_v27_hal.h"
-  #define HAL_INIT()                m5stack_basic_v27_init()
-  #define HAL_LVGL_INIT()           m5stack_basic_v27_lvgl_init()
-  #define HAL_BACKLIGHT_ON()        m5stack_basic_v27_backlight_on()
-  #define HAL_BTN_A_PRESSED()       m5stack_basic_v27_button_a_pressed()
-  #define HAL_BTN_B_PRESSED()       m5stack_basic_v27_button_b_pressed()
-  #define HAL_BTN_C_PRESSED()       m5stack_basic_v27_button_c_pressed()
-#elif defined(CONFIG_BOARD_WAVESHARE_S3_LCD19)
-  #include "waveshare_s3_lcd19_hal.h"
-  #define HAL_INIT()                waveshare_s3_lcd19_init()
-  #define HAL_LVGL_INIT()           waveshare_s3_lcd19_lvgl_init()
-  #define HAL_BACKLIGHT_ON()        waveshare_s3_lcd19_backlight_on()
-  #define HAL_BTN_A_PRESSED()       waveshare_s3_lcd19_button_a_pressed()
-  #define HAL_BTN_B_PRESSED()       waveshare_s3_lcd19_button_b_pressed()
-  #define HAL_BTN_C_PRESSED()       waveshare_s3_lcd19_button_c_pressed()
-#else
-  #error "No board target defined. Set CONFIG_BOARD_M5STACK_BASIC_V27 or CONFIG_BOARD_WAVESHARE_S3_LCD19."
-#endif
+#include "board_hal.h"
 
 #include "ui.h"
+#include "button_input.h"
+#include "slot_busy.h"
 #include "ui_layout.h"
 #include "ui_screen_splash.h"
 #include "lvgl_icons.h"
@@ -81,12 +63,11 @@ static void gps_transmission_task(void *pvParameters);
  * 1. M5Stack Basic V2.7 hardware (display, buttons, power management)
  * 2. RGB LED light system
  * 3. Bluetooth Low Energy subsystem
- * 4. User interface system (including GPIO triggers)
+ * 4. User interface system (including external button pins)
  * 
- * Main loop handles:
- * - Power button monitoring (3-second hold for shutdown)
- * - User input from physical buttons
- * - GPIO trigger processing from external hardware
+ * Main loop handles (50 ms cycle, never blocks on a held button):
+ * - Button input (internal and external, CLICK/LONG events)
+ * - Link events, command results, wake queue
  * - Display updates
  * 
  * @note This function never returns under normal operation
@@ -227,109 +208,14 @@ void app_main(void) {
      * Handles all user input, system events, and display updates
      */
     
-    /* Power button state tracking for shutdown detection */
-    static uint32_t power_button_hold_time = 0;
-    static bool power_button_was_pressed = false;
-    
     while (1) {
         /*
-         * POWER MANAGEMENT
-         * Monitor power button for 3-second hold to initiate shutdown
+         * USER INPUT (ADR-024)
+         * Samples internal and external buttons once and dispatches CLICK /
+         * LONG events to the screen-aware handlers. Non-blocking: a held
+         * button does not stall the rest of this loop.
          */
-        bool power_button_pressed = HAL_BTN_C_PRESSED();
-        
-        if (power_button_pressed && !power_button_was_pressed) {
-            /* Power button press detected - start hold timer */
-            power_button_hold_time = 0;
-            power_button_was_pressed = true;
-            ESP_LOGI(TAG, "Power button pressed - hold for 3s to shutdown");
-            
-        } else if (power_button_pressed && power_button_was_pressed) {
-            /* Power button held - increment timer and check for shutdown threshold */
-            power_button_hold_time += 50;
-            
-            if (power_button_hold_time >= 3000) {
-                ESP_LOGI(TAG, "Power button held for 3s - shutting down");
-                
-                /* Display shutdown message to user */
-                ui_show_message("Shutting down...", 0, 1000);
-                
-                /* M5Stack Basic V2.7 does not have a power hold circuit
-                 * Power management is handled differently - may need to enter deep sleep
-                 * For now, just log the shutdown request
-                 */
-                ESP_LOGI(TAG, "Power button held - shutdown requested (power management not implemented)");
-                
-                /* Infinite loop in case shutdown fails */
-                while(1) {
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                }
-            }
-        } else if (!power_button_pressed && power_button_was_pressed) {
-            /* Power button released before shutdown threshold - reset timer */
-            power_button_was_pressed = false;
-            power_button_hold_time = 0;
-        }
-
-        /*
-         * USER INPUT HANDLING
-         * Process physical button presses with debouncing
-         */
-        
-        /* Button A: Screen-aware action
-         * Main Screen: Shutter control (photo/video)
-         * Pairing Screen: Select item
-         * Settings Screen: Execute action
-         */
-        if (HAL_BTN_A_PRESSED()) {
-            ESP_LOGI(TAG, "Button A pressed");
-            ui_handle_button_a();
-            
-            /* Wait for button release to prevent multiple triggers */
-            while (HAL_BTN_A_PRESSED()) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-
-        /* Button B: Screen-aware navigation
-         * Main Screen: Cycle camera selection (0 → 1 → 2 → All)
-         * Pairing Screen: Cycle item selection
-         * Settings Screen: Cycle item selection
-         */
-        if (HAL_BTN_B_PRESSED()) {
-            ESP_LOGI(TAG, "Button B pressed");
-            ui_handle_button_b();
-            
-            /* Wait for button release to prevent multiple triggers */
-            while (HAL_BTN_B_PRESSED()) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-
-        /* Button C: Open pairing or settings
-         * Only works on Main Screen for single camera selection
-         * Opens Pairing Screen if camera slot is unpaired
-         * Opens Settings Screen if camera slot is paired
-         */
-        if (HAL_BTN_C_PRESSED()) {
-            ESP_LOGI(TAG, "Button C pressed");
-            ui_handle_button_c();
-            
-            /* Wait for button release to prevent multiple triggers */
-            while (HAL_BTN_C_PRESSED()) {
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-
-        /*
-         * GPIO TRIGGER PROCESSING
-         * Handle external GPIO triggers with randomized delays
-         * This allows external hardware to trigger camera functions
-         */
-        ui_process_pending_gpio_actions();
+        button_input_poll();
 
         /*
          * LINK-LOSS CLEANUP (ADR-018)
@@ -357,6 +243,13 @@ void app_main(void) {
          * Clears flags if camera didn't wake up within timeout period
          */
         ui_process_single_camera_wake_timeout();
+
+        /*
+         * BUSY INDICATOR STATE (plan 0017)
+         * End finished per-slot busy entries even where no screen shows
+         * them (M5Stack, other screens), so they never linger
+         */
+        slot_busy_evaluate_all();
 
         /*
          * DISPLAY UPDATE

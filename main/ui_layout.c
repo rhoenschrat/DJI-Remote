@@ -64,6 +64,11 @@ static void init_layout_320x240(ui_layout_t *L) {
     L->cam_detail.bat_icon_x = 5;   L->cam_detail.bat_icon_y = 149;
     L->cam_detail.bat_text_x = 34;  L->cam_detail.bat_text_y = 154;
 
+    /* Row warning backgrounds: full inner block width (100 - 2 x border),
+     * icon height; the two rows touch (125..148, 149..172) */
+    L->row_bg.sd_x  = 0;  L->row_bg.sd_y  = 125;  L->row_bg.sd_w  = 98;  L->row_bg.sd_h  = 24;
+    L->row_bg.bat_x = 0;  L->row_bg.bat_y = 149;  L->row_bg.bat_w = 98;  L->row_bg.bat_h = 24;
+
     /* Status bar */
     L->status.notif_x    = 15;   L->status.notif_y    = 197;
     L->status.notif_w    = 140;
@@ -117,6 +122,11 @@ static void init_layout_320x240(ui_layout_t *L) {
     /* Mode switch */
     L->mode.icon_ofs_y  = 29;
     L->mode.label_ofs_y = 68;
+
+    /* Busy indicator — not shown; the notification line gives feedback */
+    L->busy.enabled   = false;
+    L->busy.main_x    = 0;  L->busy.main_y = 0;  L->busy.main_size = 0;
+    L->busy.menu_x    = 0;  L->busy.menu_y = 0;  L->busy.menu_size = 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -162,6 +172,11 @@ static void init_layout_240x135(ui_layout_t *L) {
 
     L->cam_detail.bat_icon_x = 120;  L->cam_detail.bat_icon_y = 52;
     L->cam_detail.bat_text_x = 149;  L->cam_detail.bat_text_y = 55;
+
+    /* Row warning backgrounds: SD and battery share one line, so each covers
+     * its own part of the inner width (218), split at the battery icon x */
+    L->row_bg.sd_x  = 0;    L->row_bg.sd_y  = 52;  L->row_bg.sd_w  = 120;  L->row_bg.sd_h  = 24;
+    L->row_bg.bat_x = 120;  L->row_bg.bat_y = 52;  L->row_bg.bat_w = 98;   L->row_bg.bat_h = 24;
 
     /* Status bar */
     L->status.notif_x    = 10;   L->status.notif_y    = 90;
@@ -218,6 +233,11 @@ static void init_layout_240x135(ui_layout_t *L) {
     /* Mode switch */
     L->mode.icon_ofs_y  = 20;
     L->mode.label_ofs_y = 48;
+
+    /* Busy indicator — not shown; the notification line gives feedback */
+    L->busy.enabled   = false;
+    L->busy.main_x    = 0;  L->busy.main_y = 0;  L->busy.main_size = 0;
+    L->busy.menu_x    = 0;  L->busy.menu_y = 0;  L->busy.menu_size = 0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -262,6 +282,11 @@ static void init_layout_320x170(ui_layout_t *L) {
 
     L->cam_detail.bat_icon_x = 5;   L->cam_detail.bat_icon_y = 108;
     L->cam_detail.bat_text_x = 34;  L->cam_detail.bat_text_y = 113;
+
+    /* Row warning backgrounds: full inner block width (100 - 2 x border),
+     * icon height (80..103, 108..131; 131 is the last inner row) */
+    L->row_bg.sd_x  = 0;  L->row_bg.sd_y  = 80;   L->row_bg.sd_w  = 98;  L->row_bg.sd_h  = 24;
+    L->row_bg.bat_x = 0;  L->row_bg.bat_y = 108;  L->row_bg.bat_w = 98;  L->row_bg.bat_h = 24;
 
     /* Status bar — bottom row hosts only the GPS icon now (notification
      * widget is omitted on this preset; sentinel: notif_w == 0). */
@@ -322,6 +347,15 @@ static void init_layout_320x170(ui_layout_t *L) {
      * area above the button row */
     L->mode.icon_ofs_y  = 28;
     L->mode.label_ofs_y = 73;
+
+    /* Busy indicator (plan 0017) — no notification line on this preset.
+     * Main: 32x32, centred in the 100 px block ((100 - 32) / 2 = 34) and in
+     * its lower half (y 67..133), below title, status icon and timer; it
+     * covers the middle of the SD and battery rows. Settings: 24x24 in the
+     * empty bottom-left slot that holds the GPS icon on the main screen. */
+    L->busy.enabled   = true;
+    L->busy.main_x    = 34;  L->busy.main_y = 84;   L->busy.main_size = 32;
+    L->busy.menu_x    = 5;   L->busy.menu_y = 145;  L->busy.menu_size = 24;
 }
 
 /* ---------------------------------------------------------------------- */

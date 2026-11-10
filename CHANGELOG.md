@@ -2,6 +2,49 @@
 
 All notable changes to this project are documented in this file.
 
+## [v1.3.0]
+
+### Added
+
+- **Per-slot liveness watchdog** — A connected camera that stops sending its
+  status is marked unresponsive after about 6 s (yellow warning triangle) and
+  disconnected after 15 s.
+- **Per-slot command workers** — Button-triggered camera commands run in the
+  background per camera; the remote never waits for a camera ("Busy" on a
+  second press).
+- **Fault diagnostics** — Connection faults and restarts are recorded in a
+  dedicated `diag` flash partition and read over USB with `tools/diag/dji_diag`.
+- **Long press A/B/C** — Start/stop recording on camera 1/2/3 (or wake it for
+  a snapshot) without changing the selection; a paired, disconnected camera
+  is connected instead.
+- **Busy indicator (Waveshare)** — Per-slot cyan icon while an action runs.
+- **Configurable slot cycle** — Button B cycles through four user-defined
+  entries (single slot, slot combination or Empty), set up on the new Slots
+  screens and stored in NVS. Replaces the fixed "All Cameras" entry.
+- **Row background warning** — Low SD card (<= 16 GB / <= 6 GB) and battery
+  (<= 25 % / <= 10 %) values color the whole status row yellow or red. The
+  Kconfig choice `UI_STATUS_WARN_STYLE` keeps the previous text tint as an
+  option.
+
+### Changed
+
+- **Per-camera link handling** — Link events are handled off the BLE host
+  task; a disconnect only resets its own slot.
+- **Connection parameters** — Explicit parameters with a 5 s supervision
+  timeout; the boot scan ends about 10 s after the first camera was found.
+- **GPS push time** — The camera GPS push carries the UTC date and time from
+  the GPS module instead of the unset system clock.
+- **Button input** — Non-blocking per-button state machine with debouncing;
+  external M5Stack buttons behave like the built-in ones.
+- **Waveshare 320x170 layout** — Adapted to the housing buttons (from the
+  unreleased v1.2.1); Button C = Back in all submenus on all targets.
+- **GPS icon** — Replaced with a map pin (Material Symbols `location_on`).
+- **Build** — Project-local ESP-IDF setup with the `idf` wrapper.
+
+### Fixed
+
+- **Main screen flicker** — The main screen is populated before it is loaded.
+
 ## [v1.2.0]
 
 ### Added
